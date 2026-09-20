@@ -11,6 +11,10 @@ On the tested MECHREVO RTX 5080 Laptop, NVIDIA public GET confirmed225000mW and 
 - Driver source base: NVIDIA/open-gpu-kernel-modules commit61dcc93722ecb418bb5f2e00923f05b4b8051dd1.
 - GSP firmware SHA256:c420726d2c76c55f028a59f67ebd7a906563ef807c945bb3baa9e88c36bf334b.
 
+## Prepared v6 boot experiment
+
+A dedicated 225 W boot request and UCC Max TGP ownership mode are now built and installed locally. **The v6 entry has not been booted yet; actual225W enforcement/draw remains unverified.** See [v6 protocol, UCC patch and recovery](outputs/225w-research/gsp-persistent-v6/README.md).
+
 ## Start here
 
 - [v5 live result](outputs/225w-research/gsp-write-probe-v5/live-result.json)
