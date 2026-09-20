@@ -1,0 +1,34 @@
+{
+  "scope": "Run original RISC-V address translator offline with observed PA ranges.\n\nVirtual bases are synthetic, because the log gives PA and length only.\nThis verifies range selection, NOT real GSP access permissions or a DMA copy.\nRequires work/windows-emulation-venv/bin/python (Unicorn).\n",
+  "elf_sha256": "1e710d1edb668d79ee038fe4758ab913a0de2c3206c5de205d93a86b1d80a31d",
+  "cases": [
+    {
+      "case": "v2_wpr_prefix",
+      "source_pa": "0x3ef020000",
+      "status": "0x5b",
+      "synthetic_target_va": "0x0",
+      "instructions": 45
+    },
+    {
+      "case": "v3_heap_start",
+      "source_pa": "0x3ef024000",
+      "status": "0x0",
+      "synthetic_target_va": "0x50000000",
+      "instructions": 25
+    },
+    {
+      "case": "heap_end_valid",
+      "source_pa": "0x3f63fff00",
+      "status": "0x0",
+      "synthetic_target_va": "0x573dbf00",
+      "instructions": 25
+    },
+    {
+      "case": "heap_end_crossing",
+      "source_pa": "0x3f63fff80",
+      "status": "0x5b",
+      "synthetic_target_va": "0x0",
+      "instructions": 49
+    }
+  ]
+}

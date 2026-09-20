@@ -1,0 +1,183 @@
+{
+  "status": "offline_analysis_only_no_unlock",
+  "firmware_sha256": "c420726d2c76c55f028a59f67ebd7a906563ef807c945bb3baa9e88c36bf334b",
+  "code_va_minus_fwimage_offset": "0xe23000",
+  "elf_fwimage_file_offset": "0x40",
+  "commands": {
+    "0x20800ad3": {
+      "dispatch_file_offset": "0xe393d8",
+      "handler_va": "0x1768618",
+      "size": 4,
+      "flags": "0xc0"
+    },
+    "0x2080a618": {
+      "dispatch_file_offset": "0xe3e558",
+      "handler_va": "0x1777608",
+      "size": 20512,
+      "flags": "0x48"
+    },
+    "0x2080a61a": {
+      "dispatch_file_offset": "0xe3e598",
+      "handler_va": "0x1789848",
+      "size": 13876,
+      "flags": "0x48"
+    },
+    "0x2080e61b": {
+      "dispatch_file_offset": "0xe3f638",
+      "handler_va": "0x178e168",
+      "size": 13876,
+      "flags": "0x44"
+    },
+    "0x2080e61e": {
+      "dispatch_file_offset": "0xe3f658",
+      "handler_va": "0x178ea48",
+      "size": 12,
+      "flags": "0x44"
+    }
+  },
+  "pmgr_relative_fields": {
+    "support": "0x3d08",
+    "mode": "0x3d09",
+    "offset_active": "0x3d0a",
+    "request": "0x3d0c",
+    "ctgp_offset": "0x3d10",
+    "policy_index": "0x3d14",
+    "cached_lower": "0x3d18",
+    "cached_upper": "0x3d1c"
+  },
+  "policy_selector2_max_arb_relative": "0x104",
+  "policy_selector3_current_arb_relative": "0x1f4",
+  "model_only_target_mw": 225000,
+  "live_writes": [],
+  "limitations": [
+    "relative offsets are firmware-version-specific, not host memory addresses",
+    "live object pointers and verified writable transport not found",
+    "Linux request/offset semantics must not be equated with Windows Dynamic Boost without runtime proof",
+    "policy 13/14 physical units remain unverified"
+  ],
+  "embedded_elf": {
+    "outer_file_offset": "0x1dd040",
+    "load_segments": [
+      {
+        "type": 1,
+        "flags": 5,
+        "offset": 0,
+        "va": 16777216,
+        "filesz": 15540224
+      },
+      {
+        "type": 1,
+        "flags": 6,
+        "offset": 15540224,
+        "va": 67108864,
+        "filesz": 1765376
+      }
+    ]
+  },
+  "policy_control_set": {
+    "base_handler": "0x178096c",
+    "type_0_handler": "0x17b8aa0",
+    "type_0_calls_base_at": "0x17b8b10",
+    "type_0x12_handler": "0x17b62e0",
+    "type_0x12_calls_base_at": "0x17b6312",
+    "range_checked": true,
+    "writes_selector": 3,
+    "writes_source": "0xfe",
+    "raises_max": false
+  },
+  "max_arbiter": {
+    "setter": "0x177f3c4",
+    "aggregate": "0x17b7f38",
+    "mode": 0,
+    "operation": "min across source values",
+    "initial_source": "0xfe",
+    "adding_225000_as_second_source_does_not_raise_175000": true
+  },
+  "unresolved_paths": [
+    {
+      "helper": "0x178aed0",
+      "selector": "payload byte 1, allowed 0..6",
+      "source": "0xfd",
+      "only_direct_caller_found": "0x184de98",
+      "reason_not_unlock": "does not replace original MAX source FE; transport not established"
+    },
+    {
+      "helper": "0x17bc5a4",
+      "source": "0xfe",
+      "selector": "2 minus entry byte 6, allowed input 0..2",
+      "installed_as_callback_at": "0x17ceef2",
+      "reason_unresolved": "apparently configuration-table processing; externally callable transport not established"
+    }
+  ],
+  "verification": {
+    "firmware_hash_matches": true,
+    "elf_program_headers_checked": true,
+    "exact_instruction_checks": 10,
+    "direct_call_target_checks": 4,
+    "interface_pointer_check": true,
+    "does_not_prove_live_unlock": true
+  },
+  "configuration_profiles": {
+    "info_get": "0x2080a620",
+    "info_handler": "0x17bb544",
+    "info_size": 33688,
+    "control_get": "0x2080a622",
+    "control_handler": "0x17baae8",
+    "control_size": 76,
+    "control_set": "0x2080e623",
+    "control_set_impl": "0x17c6f64",
+    "live_get_status": 0,
+    "selected_id": 65535,
+    "info_nonzero_offsets": [
+      "0x0",
+      "0x5290"
+    ],
+    "group_masks_empty": true,
+    "set_accepts_existing_profile_id_not_arbitrary_watts": true,
+    "set_tested": false
+  },
+  "vbios_override_candidate": {
+    "source_field": "GSP_ARGUMENTS_CACHED.vbiosOverrideArgs",
+    "pa_offset": "0xa8",
+    "size_offset": "0xb0",
+    "args_size": "0xb8",
+    "reader": "0x1ad11b8",
+    "global_pa": "0x41ae600",
+    "global_size": "0x41ae5f8",
+    "pa_branch": "0x1aca368",
+    "size_branch": "0x1aca908",
+    "size_min": 512,
+    "size_upper_bound": "runtime ROM buffer capacity in s9, exact value not established",
+    "map_and_copy": "0x1acbef6..0x1acbf98",
+    "copy_call": "0x1acbf48",
+    "bios_buffer_install": "0x1acbab8",
+    "bios_parse_calls": [
+      "0x117e598",
+      "0x117f7d8"
+    ],
+    "host_population_function": "kgspPopulateGspRmInitArgs_IMPL",
+    "host_current_value": "zero from memset; not populated",
+    "status": "offline path established; production acceptance and modified-table validation unverified",
+    "live_tested": false
+  },
+  "latest_readonly_check": {
+    "gpu": "RTX 5080 Laptop",
+    "max_w": 175,
+    "default_w": 80,
+    "enforced_w": 145,
+    "draw_w": 18.92,
+    "temperature_c": 39
+  },
+  "identity_probe": {
+    "status": "prepared_not_booted",
+    "details": "identity-probe/README.md",
+    "source_changed": true,
+    "live_driver_replaced": false,
+    "eeprom_flashed": false,
+    "power_limit_changed": false,
+    "boot_entry_added": true,
+    "firmware_copy_log_metadata_va": "0x203b1518",
+    "firmware_log_base": "0x20000000",
+    "copy_log_packed_low56": "0x00040000003b1518"
+  }
+}

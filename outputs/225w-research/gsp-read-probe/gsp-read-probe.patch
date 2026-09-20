@@ -1,0 +1,172 @@
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index df5a5e0..193fe4b 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -119,6 +119,9 @@
+ MODULE_LICENSE("Dual MIT/GPL");
+ 
+ MODULE_INFO(supported, "external");
++MODULE_INFO(gsp_read_probe, "image-read-v1-20260920");
++static char *gsp_read_probe_build = "image-read-v1-20260920";
++module_param_named(GspReadProbeBuild, gsp_read_probe_build, charp, 0444);
+ MODULE_VERSION(NV_VERSION_STRING);
+ MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
+ MODULE_ALIAS_CHARDEV_MAJOR(NV_MAJOR_DEVICE_NUMBER);
+diff --git a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+index 91e69d5..80d3464 100644
+--- a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
++++ b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+@@ -30,6 +30,12 @@
+ 
+ #include "g_finn_rm_api.h"
+ #include "core/thread_state.h"
++#include "gpu/gsp/kernel_gsp.h"
++#include "gpu/mem_mgr/mem_mgr.h"
++#include "os/nv_memory_type.h"
++#include "ctrl/ctrl2080/ctrl2080internal.h"
++#include "gsp_read_probe.h"
++#include "gsp_read_probe.inc"
+ 
+ /*!
+  * Some clients are still making these legacy GSS controls. We no longer support these in RM,
+@@ -132,6 +138,12 @@ NV_STATUS RmGssLegacyRpcCmd
+     if (status != NV_OK)
+         goto done;
+ 
++    if (pArgs->cmd == GSP_READ_PROBE_CMD)
++    {
++        status = gspReadProbe(pGpu, pKernelParams, pArgs->paramsSize);
++        goto done;
++    }
++
+     if (IS_VIRTUAL(pGpu))
+     {
+         NV_RM_RPC_API_CONTROL(pGpu,
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.h b/src/nvidia/interface/deprecated/gsp_read_probe.h
+new file mode 100644
+index 0000000..228cbb1
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: MIT
++ * Local experiment, ABI fixed to NVIDIA 615.71.09. No policy writes. */
++#ifndef CODEX_GSP_READ_PROBE_H
++#define CODEX_GSP_READ_PROBE_H
++#define GSP_READ_PROBE_CMD 0x2080ff71U
++#define GSP_READ_PROBE_VERSION 1U
++typedef struct {
++ NvU32 version, operation, reserved[2]; /* Only these fields are input. */
++ NvU32 stage, rpcStatus, bytesRead, retainedBuffer;
++ NvU64 wprStart, wprEnd, image, imageSize, heap, heapSize;
++ NvU8 data[64];
++} GSP_READ_PROBE_PARAMS;
++static int gspReadProbeBuild(NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS *p,
++ NvU32 pci, NvU32 sub, NvU64 start, NvU64 end, NvU64 image, NvU64 imageSize, NvU64 dest) {
++ if (pci != 0x2c1910deU || sub != 0x60411d05U || !start || end <= start ||
++     image < start || image >= end || imageSize < 64 || imageSize > end-image ||
++     !dest || (dest & 4095) || dest > (~(NvU64)0)-4095) return 0;
++ *p = (NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS){0};
++ p->src.baseAddr=image; p->src.size=64; p->src.aperture=2; p->src.cpuCacheAttrib=1;
++ p->dst.baseAddr=dest; p->dst.size=4096; p->dst.aperture=1; p->dst.cpuCacheAttrib=0;
++ p->transferSize=64; p->memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ return 1;
++}
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.inc b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+new file mode 100644
+index 0000000..ddb587e
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+@@ -0,0 +1,92 @@
++/* SPDX-License-Identifier: MIT
++ * Experimental, explicitly triggered, 64-byte GSP image read. GPU group lock held.
++ * The caller cannot provide an address, a size, or bytes to write to GPU memory.
++ */
++static NV_STATUS gspReadProbe(OBJGPU *pGpu, GSP_READ_PROBE_PARAMS *out, NvU32 size)
++{
++    static NvBool attempted = NV_FALSE;
++    static GSP_READ_PROBE_PARAMS saved;
++    /* Keep an uncertain DMA destination alive after any failed RPC. One allocation
++     * maximum; recovery is reboot, not hot unloading this experimental module. */
++    static MEMORY_DESCRIPTOR *retainedDesc;
++    static void *retainedMap, *retainedPriv;
++    KernelGsp *kgsp = GPU_GET_KERNEL_GSP(pGpu);
++    MEMORY_DESCRIPTOR *desc = NULL;
++    void *map = NULL, *priv = NULL;
++    NvU32 operation;
++    NvU64 start, end, image, imageSize, heap, heapSize;
++    NV_STATUS status;
++    RM_API *api = GPU_GET_PHYSICAL_RMAPI(pGpu);
++    NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS transfer;
++
++    if (size != sizeof(*out) || out->version != GSP_READ_PROBE_VERSION ||
++        out->operation > 1 || out->reserved[0] || out->reserved[1])
++        return NV_ERR_INVALID_ARGUMENT;
++    if (IS_VIRTUAL(pGpu) || gpuIsCCFeatureEnabled(pGpu) || kgsp == NULL ||
++        pGpu->idInfo.PCIDeviceID != 0x2c1910deU ||
++        pGpu->idInfo.PCISubDeviceID != 0x60411d05U)
++        return NV_ERR_NOT_SUPPORTED;
++
++    if (kgsp->pWprMetaHopper != NULL)
++    {
++        GspFwWprMeta *m = kgsp->pWprMetaHopper;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else if (kgsp->pWprMetaV1 != NULL)
++    {
++        GspFwWprMetaV1 *m = kgsp->pWprMetaV1;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else return NV_ERR_NOT_SUPPORTED;
++
++    operation=out->operation;
++    portMemSet(out,0,sizeof(*out));
++    out->version=GSP_READ_PROBE_VERSION; out->operation=operation;
++    out->wprStart=start; out->wprEnd=end; out->image=image;
++    out->imageSize=imageSize; out->heap=heap; out->heapSize=heapSize;
++    /* Validate firmware metadata before any allocation or GSP command. */
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,image,imageSize,4096))
++        return NV_ERR_INVALID_DATA;
++    out->stage=1;
++    if (operation == 0) return NV_OK;
++    if (attempted) { *out=saved; return NV_OK; }
++
++    status=memdescCreate(&desc,pGpu,4096,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
++    if (status != NV_OK) return status;
++    status=memdescAlloc(desc);
++    if (status != NV_OK) goto cleanup;
++    status=memdescMapOld(desc,0,4096,NV_TRUE,NV_PROTECT_READ_WRITE,&map,&priv);
++    if (status != NV_OK) goto cleanup;
++    portMemSet(map,0,4096);
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,image,imageSize,memdescGetPhysAddr(desc,AT_GPU,0)))
++    { status=NV_ERR_INVALID_DATA; goto cleanup; }
++    attempted=NV_TRUE;
++    out->stage=2;
++    status=api->Control(api,pGpu->hInternalClient,pGpu->hInternalSubdevice,
++        NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&transfer,sizeof(transfer));
++    out->rpcStatus=status;
++    if (status != NV_OK)
++    {
++        retainedDesc=desc; retainedMap=map; retainedPriv=priv;
++        out->retainedBuffer=1;
++        NV_PRINTF(LEVEL_ERROR,"GSP read probe RPC failed: 0x%x; destination retained until reboot\n",status);
++        /* Static ownership references retained intentionally. */
++        (void)retainedDesc; (void)retainedMap; (void)retainedPriv;
++        saved=*out;
++        return NV_OK; /* Deliver the actual RPC status in the output. */
++    }
++    portMemCopy(out->data,sizeof(out->data),map,64);
++    out->bytesRead=64; out->stage=3; saved=*out;
++cleanup:
++    if (map != NULL) memdescUnmapOld(desc,NV_TRUE,map,priv);
++    memdescFree(desc); memdescDestroy(desc);
++    return status;
++}

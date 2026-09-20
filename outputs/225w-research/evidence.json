@@ -1,0 +1,182 @@
+{
+  "status": "read_only_probe_succeeded_unlock_not_implemented",
+  "target_watts": 225,
+  "gpu": "10de:2c19 subsystem 1d05:6041",
+  "driver": "615.71.09",
+  "mutating_calls_executed": [],
+  "policies": [
+    {
+      "index": 2,
+      "info_buffer_offset": 712,
+      "type_byte": 0,
+      "id_byte": 0,
+      "default_raw": 80000,
+      "maximum_raw": 175000,
+      "control_type_byte": 0,
+      "control_value_raw": 4294967295,
+      "status_type_byte": 0,
+      "observed_slots": [
+        {
+          "relative_slot": 0,
+          "mode": 0,
+          "effective": 150000,
+          "reference": 80000,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 4294967295
+            },
+            {
+              "id": "0xfc",
+              "value": 4294967295
+            },
+            {
+              "id": "0xf7",
+              "value": 150000
+            }
+          ]
+        },
+        {
+          "relative_slot": 1,
+          "mode": 0,
+          "effective": 60000,
+          "reference": 45000,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 60000
+            }
+          ]
+        },
+        {
+          "relative_slot": 2,
+          "mode": 0,
+          "effective": 150000,
+          "reference": 80000,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 4294967295
+            },
+            {
+              "id": "0xfc",
+              "value": 4294967295
+            },
+            {
+              "id": "0xf7",
+              "value": 150000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 13,
+      "info_buffer_offset": 3572,
+      "type_byte": 18,
+      "id_byte": 27,
+      "default_raw": 210000,
+      "maximum_raw": 210000,
+      "control_type_byte": 18,
+      "control_value_raw": 210000,
+      "status_type_byte": 18,
+      "observed_slots": [
+        {
+          "relative_slot": 0,
+          "mode": 0,
+          "effective": 210000,
+          "reference": 210000,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 210000
+            }
+          ]
+        },
+        {
+          "relative_slot": 1,
+          "mode": 0,
+          "effective": 4294967295,
+          "reference": 0,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 4294967295
+            }
+          ]
+        },
+        {
+          "relative_slot": 2,
+          "mode": 0,
+          "effective": 210000,
+          "reference": 210000,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 210000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "index": 14,
+      "info_buffer_offset": 3832,
+      "type_byte": 18,
+      "id_byte": 28,
+      "default_raw": 60000,
+      "maximum_raw": 60000,
+      "control_type_byte": 18,
+      "control_value_raw": 60000,
+      "status_type_byte": 18,
+      "observed_slots": [
+        {
+          "relative_slot": 0,
+          "mode": 0,
+          "effective": 60000,
+          "reference": 60000,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 60000
+            }
+          ]
+        },
+        {
+          "relative_slot": 1,
+          "mode": 0,
+          "effective": 4294967295,
+          "reference": 0,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 4294967295
+            }
+          ]
+        },
+        {
+          "relative_slot": 2,
+          "mode": 0,
+          "effective": 60000,
+          "reference": 60000,
+          "sources": [
+            {
+              "id": "0xfe",
+              "value": 60000
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "unsupported_gets": {
+    "0x2080a61d_source_fd": "0x56",
+    "0x2080a61d_source_fe": "0x56"
+  },
+  "observed_read_buffer_layout_only": true,
+  "capture_hashes": {
+    "pmgr-a618.bin": "0b08c50160aecf1a557aaab4104cde7cddcb5177792774d73b53b1bd1b6981a9",
+    "pmgr-control.bin": "b51cb938190fc441dce700a561803a369b4e1379f567883c8ded8045bfb4fb4d",
+    "pmgr-status.bin": "09807daf60a7c23be70f21995e81e80e9d8b1b2ed5c905d430a77cd2ddd9f9ed"
+  }
+}

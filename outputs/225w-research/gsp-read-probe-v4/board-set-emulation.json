@@ -1,0 +1,146 @@
+{
+  "scope": "Offline original-code emulation over a captured heap. NO device access.\nIt verifies CPU-side writes of the current BoardSet path, not firmware/PMU\nsynchronization, electrical behavior, or permission to apply these writes live.\n",
+  "elf_sha256": "1e710d1edb668d79ee038fe4758ab913a0de2c3206c5de205d93a86b1d80a31d",
+  "heap_sha256": "a3f112325ffccd57d18a2d845e393b2c384e5e065d54301a1797e36f7aad2b24",
+  "results": [
+    {
+      "source": "0xfe",
+      "value": 175000,
+      "effective_max": 175000,
+      "instructions": 190,
+      "writes": [
+        {
+          "pc": "0x17b7f96",
+          "address": "0x7f23bc724",
+          "board_offset": "0x114",
+          "size": 4,
+          "before": "98ab0200",
+          "after": "98ab0200"
+        },
+        {
+          "pc": "0x17b801e",
+          "address": "0x7f23bc718",
+          "board_offset": "0x108",
+          "size": 4,
+          "before": "98ab0200",
+          "after": "98ab0200"
+        },
+        {
+          "pc": "0x177f456",
+          "address": "0x7f23bc654",
+          "board_offset": "0x44",
+          "size": 1,
+          "before": "00",
+          "after": "01"
+        }
+      ]
+    },
+    {
+      "source": "0xfd",
+      "value": 225000,
+      "effective_max": 175000,
+      "instructions": 206,
+      "writes": [
+        {
+          "pc": "0x17b8012",
+          "address": "0x7f23bc728",
+          "board_offset": "0x118",
+          "size": 1,
+          "before": "00",
+          "after": "fd"
+        },
+        {
+          "pc": "0x17b8016",
+          "address": "0x7f23bc72c",
+          "board_offset": "0x11c",
+          "size": 4,
+          "before": "00000000",
+          "after": "e86e0300"
+        },
+        {
+          "pc": "0x17b801a",
+          "address": "0x7f23bc715",
+          "board_offset": "0x105",
+          "size": 1,
+          "before": "01",
+          "after": "02"
+        },
+        {
+          "pc": "0x17b801e",
+          "address": "0x7f23bc718",
+          "board_offset": "0x108",
+          "size": 4,
+          "before": "98ab0200",
+          "after": "98ab0200"
+        },
+        {
+          "pc": "0x177f456",
+          "address": "0x7f23bc654",
+          "board_offset": "0x44",
+          "size": 1,
+          "before": "00",
+          "after": "01"
+        }
+      ]
+    },
+    {
+      "source": "0xfe",
+      "value": 225000,
+      "effective_max": 225000,
+      "instructions": 190,
+      "writes": [
+        {
+          "pc": "0x17b7f96",
+          "address": "0x7f23bc724",
+          "board_offset": "0x114",
+          "size": 4,
+          "before": "98ab0200",
+          "after": "e86e0300"
+        },
+        {
+          "pc": "0x17b801e",
+          "address": "0x7f23bc718",
+          "board_offset": "0x108",
+          "size": 4,
+          "before": "98ab0200",
+          "after": "e86e0300"
+        },
+        {
+          "pc": "0x177f456",
+          "address": "0x7f23bc654",
+          "board_offset": "0x44",
+          "size": 1,
+          "before": "00",
+          "after": "01"
+        }
+      ],
+      "restore_writes": [
+        {
+          "pc": "0x17b7f96",
+          "address": "0x7f23bc724",
+          "board_offset": "0x114",
+          "size": 4,
+          "before": "e86e0300",
+          "after": "98ab0200"
+        },
+        {
+          "pc": "0x17b801e",
+          "address": "0x7f23bc718",
+          "board_offset": "0x108",
+          "size": 4,
+          "before": "e86e0300",
+          "after": "98ab0200"
+        },
+        {
+          "pc": "0x177f456",
+          "address": "0x7f23bc654",
+          "board_offset": "0x44",
+          "size": 1,
+          "before": "01",
+          "after": "01"
+        }
+      ],
+      "restore_remaining_difference": "policy dirty flag at +0x44, set by original setter"
+    }
+  ]
+}

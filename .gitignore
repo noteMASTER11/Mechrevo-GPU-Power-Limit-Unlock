@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.so
+*.ko*
+*.bin
+*.rom
+*.elf
+*.exe
+*.sys
+*.zip
+*.img
+*.log
+**/live/
+**/modules-root/

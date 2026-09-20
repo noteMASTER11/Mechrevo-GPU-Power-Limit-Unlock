@@ -1,0 +1,427 @@
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index df5a5e0..a04c700 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -119,6 +119,9 @@
+ MODULE_LICENSE("Dual MIT/GPL");
+ 
+ MODULE_INFO(supported, "external");
++MODULE_INFO(gsp_read_probe, "power-words-v5-20260920");
++static char *gsp_read_probe_build = "power-words-v5-20260920";
++module_param_named(GspReadProbeBuild, gsp_read_probe_build, charp, 0444);
+ MODULE_VERSION(NV_VERSION_STRING);
+ MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
+ MODULE_ALIAS_CHARDEV_MAJOR(NV_MAJOR_DEVICE_NUMBER);
+diff --git a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+index 91e69d5..4b5d18b 100644
+--- a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
++++ b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+@@ -30,6 +30,15 @@
+ 
+ #include "g_finn_rm_api.h"
+ #include "core/thread_state.h"
++#include "gpu/gsp/kernel_gsp.h"
++#include "gpu/bus/kern_bus.h"
++#include "gpu/mem_mgr/mem_mgr.h"
++#include "os/nv_memory_type.h"
++#include "ctrl/ctrl2080/ctrl2080internal.h"
++#include "gsp_read_probe.h"
++#include "gsp_read_probe.inc"
++#include "gsp_power_probe.h"
++#include "gsp_power_probe.inc"
+ 
+ /*!
+  * Some clients are still making these legacy GSS controls. We no longer support these in RM,
+@@ -132,6 +141,18 @@ NV_STATUS RmGssLegacyRpcCmd
+     if (status != NV_OK)
+         goto done;
+ 
++    if (pArgs->cmd == GSP_POWER_PROBE_CMD)
++    {
++        status = gspPowerProbe(pGpu, pKernelParams, pArgs->paramsSize);
++        goto done;
++    }
++
++    if (pArgs->cmd == GSP_READ_PROBE_CMD)
++    {
++        status = gspReadProbe(pGpu, pKernelParams, pArgs->paramsSize);
++        goto done;
++    }
++
+     if (IS_VIRTUAL(pGpu))
+     {
+         NV_RM_RPC_API_CONTROL(pGpu,
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.h b/src/nvidia/interface/deprecated/gsp_read_probe.h
+new file mode 100644
+index 0000000..a1a609e
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: MIT. Fixed observed heap, read-only experimental ABI. */
++#ifndef CODEX_GSP_READ_PROBE_H
++#define CODEX_GSP_READ_PROBE_H
++#define GSP_READ_PROBE_CMD 0x2080ff71U
++#define GSP_READ_PROBE_VERSION 4U
++#define GSP_READ_PROBE_WPR_START 0x3ef020000ULL
++#define GSP_READ_PROBE_WPR_END   0x3f9c60000ULL
++#define GSP_READ_PROBE_SOURCE    0x3ef024000ULL
++#define GSP_READ_PROBE_HEAP_SIZE 0x73dc000ULL
++#define GSP_READ_PROBE_PAGE_SIZE 4096U
++#define GSP_READ_PROBE_MAX_CALLS 32768U
++typedef struct {
++ NvU32 version, operation, reserved[2];
++ NvU64 pageOffset; /* Input: relative, page-aligned, inside this fixed heap only. */
++ NvU32 stage, rpcStatus, bytesRead, retainedBuffer, callsUsed, reservedOut;
++ NvU64 wprStart, wprEnd, image, imageSize, heap, heapSize, source;
++ NvU8 data[GSP_READ_PROBE_PAGE_SIZE];
++} GSP_READ_PROBE_PARAMS;
++static int gspReadProbeBuild(NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS *p,
++ NvU32 pci, NvU32 sub, NvU64 start, NvU64 end, NvU64 offset, NvU64 dest) {
++ if (pci != 0x2c1910deU || sub != 0x60411d05U ||
++     start != GSP_READ_PROBE_WPR_START || end != GSP_READ_PROBE_WPR_END ||
++     (offset & 4095) || offset > GSP_READ_PROBE_HEAP_SIZE-4096 ||
++     !dest || (dest & 4095) || dest > (~(NvU64)0)-4095) return 0;
++ *p = (NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS){0};
++ p->src.baseAddr=GSP_READ_PROBE_SOURCE+offset; p->src.size=4096;
++ p->src.aperture=2; p->src.cpuCacheAttrib=0;
++ p->dst.baseAddr=dest; p->dst.size=4096; p->dst.aperture=1; p->dst.cpuCacheAttrib=0;
++ p->transferSize=4096; p->memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ return 1;
++}
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.inc b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+new file mode 100644
+index 0000000..f239dd7
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+@@ -0,0 +1,117 @@
++static NvBool gspProbe_reserveRestore, gspProbe_internalRead;
++static OBJGPU *gspProbe_owner;
++    static NvBool gspProbe_poisoned = NV_FALSE;
++    static NvU32 gspProbe_callsUsed;
++    /* Keep an uncertain DMA destination alive after any failed RPC. One allocation
++     * maximum; recovery is reboot, not hot unloading this experimental module. */
++    static MEMORY_DESCRIPTOR *gspProbe_retainedDesc;
++    static void *gspProbe_retainedMap, *gspProbe_retainedPriv;
++
++/* SPDX-License-Identifier: MIT
++ * Experimental, explicitly triggered, 4096-byte RM heap page read. GPU group lock held.
++ * The caller cannot provide an address, a size, or bytes to write to GPU memory.
++ */
++static NV_STATUS gspReadProbe(OBJGPU *pGpu, GSP_READ_PROBE_PARAMS *out, NvU32 size)
++{
++    KernelGsp *kgsp = GPU_GET_KERNEL_GSP(pGpu);
++    MEMORY_DESCRIPTOR *desc = NULL;
++    void *map = NULL, *priv = NULL;
++    NvU32 operation;
++    NvU64 start, end, image, imageSize, heap, heapSize, offset;
++    NV_STATUS status;
++    NV_RANGE wprRegions[2] = {NV_RANGE_EMPTY, NV_RANGE_EMPTY};
++    RM_API *api = GPU_GET_PHYSICAL_RMAPI(pGpu);
++    NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS transfer;
++
++    if (size != sizeof(*out) || out->version != GSP_READ_PROBE_VERSION ||
++        out->operation > 1 || out->reserved[0] || out->reserved[1] ||
++        (out->operation == 0 && out->pageOffset != 0))
++        return NV_ERR_INVALID_ARGUMENT;
++    if (IS_VIRTUAL(pGpu) || gpuIsCCFeatureEnabled(pGpu) || kgsp == NULL ||
++        pGpu->idInfo.PCIDeviceID != 0x2c1910deU ||
++        pGpu->idInfo.PCISubDeviceID != 0x60411d05U)
++        return NV_ERR_NOT_SUPPORTED;
++
++    if (kgsp->pWprMetaHopper != NULL)
++    {
++        GspFwWprMeta *m = kgsp->pWprMetaHopper;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else if (kgsp->pWprMetaV1 != NULL)
++    {
++        GspFwWprMetaV1 *m = kgsp->pWprMetaV1;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else return NV_ERR_NOT_SUPPORTED;
++
++    /* Hopper+ boot input does not receive ACR-computed offsets back. Read the
++     * actual WPR registers through NVIDIA's architecture-specific read helper.
++     * No guessed image/heap address and no hardware register write. */
++    kbusCarveoutWprs_HAL(pGpu, GPU_GET_KERNEL_BUS(pGpu), wprRegions);
++    if (wprRegions[1].hi < wprRegions[1].lo || wprRegions[1].hi == ~(NvU64)0)
++        return NV_ERR_INVALID_DATA;
++    start=wprRegions[1].lo; end=wprRegions[1].hi+1;
++    /* This probe is deliberately fixed to the observed layout. The first
++     * 16 KiB of WPR2 are NOT in the RM FB mapper's allowed regions. */
++    if (start != GSP_READ_PROBE_WPR_START || end != GSP_READ_PROBE_WPR_END ||
++        imageSize != 0x19be000ULL || heapSize != 0x8a00000ULL)
++        return NV_ERR_INVALID_DATA;
++
++    if (gspProbe_owner != NULL && gspProbe_owner != pGpu) return NV_ERR_NOT_SUPPORTED;
++    gspProbe_owner=pGpu;
++    operation=out->operation; offset=out->pageOffset;
++    portMemSet(out,0,sizeof(*out));
++    out->version=GSP_READ_PROBE_VERSION; out->operation=operation;
++    out->wprStart=start; out->wprEnd=end; out->image=image;
++    out->imageSize=imageSize; out->heap=heap; out->heapSize=heapSize;
++    out->pageOffset=offset; out->callsUsed=gspProbe_callsUsed;
++    out->retainedBuffer=gspProbe_poisoned;
++    /* Validate firmware metadata before any allocation or GSP command. */
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,offset,4096))
++        return NV_ERR_INVALID_DATA;
++    out->source=GSP_READ_PROBE_SOURCE+offset;
++    out->stage=1;
++    if (operation == 0) return NV_OK;
++    if (gspProbe_poisoned || gspProbe_callsUsed >= GSP_READ_PROBE_MAX_CALLS ||
++        (gspProbe_reserveRestore && !gspProbe_internalRead && gspProbe_callsUsed >= GSP_READ_PROBE_MAX_CALLS-128))
++        return NV_ERR_INVALID_STATE;
++
++    status=memdescCreate(&desc,pGpu,4096,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
++    if (status != NV_OK) return status;
++    status=memdescAlloc(desc);
++    if (status != NV_OK) goto cleanup;
++    status=memdescMapOld(desc,0,4096,NV_TRUE,NV_PROTECT_READ_WRITE,&map,&priv);
++    if (status != NV_OK) goto cleanup;
++    portMemSet(map,0,4096);
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,offset,memdescGetPhysAddr(desc,AT_GPU,0)))
++    { status=NV_ERR_INVALID_DATA; goto cleanup; }
++    out->callsUsed=++gspProbe_callsUsed;
++    out->stage=2;
++    status=api->Control(api,pGpu->hInternalClient,pGpu->hInternalSubdevice,
++        NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&transfer,sizeof(transfer));
++    out->rpcStatus=status;
++    if (status != NV_OK)
++    {
++        gspProbe_poisoned=NV_TRUE;
++        gspProbe_retainedDesc=desc; gspProbe_retainedMap=map; gspProbe_retainedPriv=priv;
++        out->retainedBuffer=1;
++        NV_PRINTF(LEVEL_ERROR,"GSP read probe RPC failed: 0x%x; destination retained until reboot\n",status);
++        /* Static ownership references retained intentionally. */
++        (void)gspProbe_retainedDesc; (void)gspProbe_retainedMap; (void)gspProbe_retainedPriv;
++        return NV_OK; /* Deliver the actual RPC status in the output. */
++    }
++    portMemCopy(out->data,sizeof(out->data),map,4096);
++    out->bytesRead=4096; out->stage=3;
++cleanup:
++    if (map != NULL) memdescUnmapOld(desc,NV_TRUE,map,priv);
++    memdescFree(desc); memdescDestroy(desc);
++    return status;
++}
+diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.h b/src/nvidia/interface/deprecated/gsp_power_probe.h
+new file mode 100644
+index 0000000..4047de5
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_power_probe.h
+@@ -0,0 +1,115 @@
++/* SPDX-License-Identifier: MIT. Local research ABI; no arbitrary writes. */
++#ifndef CODEX_GSP_POWER_PROBE_H
++#define CODEX_GSP_POWER_PROBE_H
++#define GSP_POWER_PROBE_CMD 0x2080ff72U
++#define GSP_POWER_PROBE_VERSION 1U
++#define GSP_POWER_HEAP_VA 0x7f2000000ULL
++typedef struct {
++ NvU32 version,operation;
++ NvU64 gpuOffset,pmgrOffset,boardOffset;
++ NvU32 reserved[4];
++ NvU32 stage,result,armed,active,poisoned,writes;
++ NvU32 maxValue,feValue,upperValue,currentValue;
++} GSP_POWER_PROBE_PARAMS;
++typedef struct {
++ NvU32 armed,used,active,poisoned,writes;
++ NvU64 gpu,pmgr,board;
++} GSP_POWER_STATE;
++typedef struct {
++ void *context;
++ NV_STATUS (*read)(void *,NvU64,void *,NvU32);
++ NV_STATUS (*write)(void *,NvU64,NvU32);
++} GSP_POWER_IO;
++
++static int gpRange(NvU64 o,NvU64 n) {
++ return !(o&7) && n<=0x73dc000ULL && o<=0x73dc000ULL-n;
++}
++static int gpDisjoint(NvU64 a,NvU64 an,NvU64 b,NvU64 bn) {
++ return a+an<=b || b+bn<=a;
++}
++static NV_STATUS gpCheck(GSP_POWER_IO *io,NvU64 o,NvU64 want,NvU32 n) {
++ NvU64 value=0;NV_STATUS st=io->read(io->context,o,&value,n);
++ return st!=NV_OK?st:(value==want?NV_OK:NV_ERR_INVALID_DATA);
++}
++static NV_STATUS gpValidate(GSP_POWER_IO *io,GSP_POWER_PROBE_PARAMS *p,NvU32 expected) {
++ NvU64 array=0,group=0;NvU32 mask=0;NV_STATUS st;
++#define GP_CHECK(o,v,n) do{st=gpCheck(io,(o),(v),(n));if(st!=NV_OK)return st;}while(0)
++#define GP_READ(o,d,n) do{st=io->read(io->context,(o),(d),(n));if(st!=NV_OK)return st;}while(0)
++ p->stage=10;
++ GP_CHECK(p->gpuOffset+0xa0,GSP_POWER_HEAP_VA+p->gpuOffset,8);
++ GP_CHECK(p->gpuOffset+0x2210,GSP_POWER_HEAP_VA+p->pmgrOffset,8);
++ GP_CHECK(p->pmgrOffset+0x1b8,GSP_POWER_HEAP_VA+p->pmgrOffset,8);
++ GP_CHECK(p->pmgrOffset+0x60,GSP_POWER_HEAP_VA+p->gpuOffset,8);
++ GP_READ(p->pmgrOffset+0x1cc0,&array,8);GP_READ(p->pmgrOffset+0x1cc8,&group,8);
++ if(array<GSP_POWER_HEAP_VA || group<GSP_POWER_HEAP_VA ||
++    !gpRange(array-GSP_POWER_HEAP_VA,256) || !gpRange(group-GSP_POWER_HEAP_VA,16))return NV_ERR_INVALID_DATA;
++ GP_CHECK(array-GSP_POWER_HEAP_VA+16,GSP_POWER_HEAP_VA+p->boardOffset,8);
++ GP_READ(group-GSP_POWER_HEAP_VA+8,&mask,4);
++ if(!(mask&4))return NV_ERR_INVALID_DATA;
++ p->stage=11;
++ GP_CHECK(p->boardOffset,0,1);GP_CHECK(p->boardOffset+2,2,2);
++ GP_CHECK(p->boardOffset+8,0x4193460,8);
++ GP_CHECK(p->boardOffset+0x28,0,1);GP_CHECK(p->boardOffset+0x2a,0,1);
++ GP_CHECK(p->boardOffset+0x2d0,0x17b2248,8);
++ GP_CHECK(p->boardOffset+0x2d8,0x177c0f4,8);GP_CHECK(p->boardOffset+0x2e0,0x177c250,8);
++ GP_CHECK(p->boardOffset+0x104,0,1);GP_CHECK(p->boardOffset+0x105,1,1);
++ GP_CHECK(p->boardOffset+0x10c,175000,4);GP_CHECK(p->boardOffset+0x110,0xfe,1);
++ GP_CHECK(p->pmgrOffset+0x3d14,2,4);
++ p->stage=12;
++ GP_READ(p->boardOffset+0x108,&p->maxValue,4);
++ GP_READ(p->boardOffset+0x114,&p->feValue,4);
++ GP_READ(p->pmgrOffset+0x3d1c,&p->upperValue,4);
++ GP_READ(p->boardOffset+0x1f8,&p->currentValue,4);
++ if(p->maxValue!=expected || p->feValue!=expected || p->upperValue!=expected)return NV_ERR_INVALID_DATA;
++ return NV_OK;
++#undef GP_CHECK
++#undef GP_READ
++}
++static NV_STATUS gpSet(GSP_POWER_STATE *s,GSP_POWER_IO *io,NvU64 off,NvU32 old,NvU32 value) {
++ NV_STATUS st=gpCheck(io,off,old,4);
++ if(st!=NV_OK)return st;
++ ++s->writes;
++ st=io->write(io->context,off,value);
++ if(st==NV_OK)st=gpCheck(io,off,value,4);
++ /* Any failed write/readback is indeterminate. Never blindly issue another DMA. */
++ if(st!=NV_OK)s->poisoned=1;
++ return st;
++}
++static NV_STATUS gspPowerEngine(GSP_POWER_STATE *s,GSP_POWER_IO *io,GSP_POWER_PROBE_PARAMS *p) {
++ NV_STATUS st=NV_OK;NvU32 expected=s->active?225000:175000;
++ if(p->version!=1 || p->operation>3 || p->reserved[0] || p->reserved[1] || p->reserved[2] || p->reserved[3] ||
++    !gpRange(p->gpuOffset,0x2300) || !gpRange(p->pmgrOffset,0x4f28) || !gpRange(p->boardOffset,0x340) ||
++    !gpDisjoint(p->gpuOffset,0x2300,p->pmgrOffset,0x4f28) ||
++    !gpDisjoint(p->gpuOffset,0x2300,p->boardOffset,0x340) ||
++    !gpDisjoint(p->pmgrOffset,0x4f28,p->boardOffset,0x340))return NV_ERR_INVALID_ARGUMENT;
++ p->stage=1;
++ if(s->poisoned){st=NV_ERR_INVALID_STATE;goto done;}
++ if((s->armed || s->active || s->used) && (s->gpu!=p->gpuOffset || s->pmgr!=p->pmgrOffset || s->board!=p->boardOffset)){
++  st=NV_ERR_INVALID_STATE;goto done;
++ }
++ if((p->operation==1&&(s->armed||s->used)) || (p->operation==2&&(!s->armed||s->used)) || (p->operation==3&&!s->active)){
++  st=NV_ERR_INVALID_STATE;goto done;
++ }
++ st=gpValidate(io,p,expected);if(st!=NV_OK)goto done;
++ if(p->operation==0){p->stage=100;goto done;}
++ /* No reduce/raise cycle when another actor already requested >175W. */
++ if(p->currentValue>175000){st=NV_ERR_INVALID_STATE;goto done;}
++ if(p->operation==1){
++  p->stage=20;st=gpSet(s,io,p->boardOffset+0x114,175000,175000);
++  if(st==NV_OK){s->armed=1;s->gpu=p->gpuOffset;s->pmgr=p->pmgrOffset;s->board=p->boardOffset;}
++ } else {
++  NvU32 value=p->operation==2?225000:175000;
++  if(p->operation==2){s->used=1;s->active=1;}
++  p->stage=21;st=gpSet(s,io,p->boardOffset+0x114,expected,value);
++  if(st==NV_OK){p->stage=22;st=gpSet(s,io,p->boardOffset+0x108,expected,value);}
++  if(st==NV_OK){p->stage=23;st=gpSet(s,io,p->pmgrOffset+0x3d1c,expected,value);}
++  /* Even a definite allocation/precondition failure can leave a partial update.
++   * Stop rather than invent a restoration when the object changed concurrently. */
++  if(st!=NV_OK)s->poisoned=1;
++  else if(p->operation==3)s->active=0;
++ }
++ if(st==NV_OK){st=gpValidate(io,p,s->active?225000:175000);if(st!=NV_OK)s->poisoned=1;}
++ if(st==NV_OK)p->stage=100;
++ done:p->result=st;p->armed=s->armed;p->active=s->active;p->poisoned=s->poisoned;p->writes=s->writes;return st;
++}
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.inc b/src/nvidia/interface/deprecated/gsp_power_probe.inc
+new file mode 100644
+index 0000000..16d1a53
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_power_probe.inc
+@@ -0,0 +1,86 @@
++/* SPDX-License-Identifier: MIT. Called under the same root/API/GPU locks as v4.
++ * Only the validated engine can select three four-byte policy destinations.
++ * No commands are run at module load, exit, or automatically on boot.
++ */
++typedef struct {OBJGPU *gpu;GSP_READ_PROBE_PARAMS *page;} GSP_POWER_CONTEXT;
++static GSP_POWER_STATE gspPowerState;
++static NV_STATUS gspPowerRead(void *opaque,NvU64 offset,void *dest,NvU32 size)
++{
++ GSP_POWER_CONTEXT *c=opaque;NV_STATUS st;NvU32 done=0;
++ if(offset>GSP_READ_PROBE_HEAP_SIZE || size>GSP_READ_PROBE_HEAP_SIZE-offset)return NV_ERR_INVALID_ARGUMENT;
++ while(done<size){
++  NvU64 at=offset+done;NvU32 inPage=(NvU32)(at&4095),n=4096-inPage;
++  if(n>size-done)n=size-done;
++  portMemSet(c->page,0,sizeof(*c->page));c->page->version=4;c->page->operation=1;c->page->pageOffset=at&~4095ULL;
++  gspProbe_internalRead=NV_TRUE;
++  st=gspReadProbe(c->gpu,c->page,sizeof(*c->page));
++  gspProbe_internalRead=NV_FALSE;
++  if(st!=NV_OK)return st;
++  if(c->page->rpcStatus!=NV_OK)return c->page->rpcStatus;
++  if(c->page->stage!=3 || c->page->bytesRead!=4096 || c->page->retainedBuffer)return NV_ERR_INVALID_STATE;
++  portMemCopy((NvU8*)dest+done,size-done,c->page->data+inPage,n);done+=n;
++ }
++ return NV_OK;
++}
++static NV_STATUS gspPowerWrite(void *opaque,NvU64 offset,NvU32 value)
++{
++ GSP_POWER_CONTEXT *c=opaque;OBJGPU *g=c->gpu;
++ MEMORY_DESCRIPTOR *desc=NULL;void *map=NULL,*priv=NULL;NV_STATUS st;
++ NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS x={0};
++ RM_API *api=GPU_GET_PHYSICAL_RMAPI(g);NvU64 pa;
++ /* Defense in depth: engine must bind targets before its first write. */
++ if((offset!=gspPowerState.board+0x114 && offset!=gspPowerState.board+0x108 && offset!=gspPowerState.pmgr+0x3d1c) ||
++    (value!=175000 && value!=225000) || (offset&3) || offset>GSP_READ_PROBE_HEAP_SIZE-4 ||
++    gspProbe_poisoned || gspProbe_callsUsed>=GSP_READ_PROBE_MAX_CALLS)return NV_ERR_INVALID_STATE;
++ st=memdescCreate(&desc,g,4096,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
++ if(st!=NV_OK)return st;
++ st=memdescAlloc(desc);if(st!=NV_OK)goto cleanup;
++ st=memdescMapOld(desc,0,4096,NV_TRUE,NV_PROTECT_READ_WRITE,&map,&priv);if(st!=NV_OK)goto cleanup;
++ portMemSet(map,0,4096);portMemCopy(map,4096,&value,4);
++ pa=memdescGetPhysAddr(desc,AT_GPU,0);
++ if(!pa || (pa&4095) || pa>(~(NvU64)0)-4095){st=NV_ERR_INVALID_DATA;goto cleanup;}
++ x.src.baseAddr=pa;x.src.size=4096;x.src.aperture=1;x.src.cpuCacheAttrib=0;
++ x.dst.baseAddr=GSP_READ_PROBE_SOURCE+(offset&~4095ULL);x.dst.size=4096;
++ x.dst.offset=offset&4095;x.dst.aperture=2;x.dst.cpuCacheAttrib=0;
++ x.transferSize=4;x.memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ ++gspProbe_callsUsed;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&x,sizeof(x));
++ if(st!=NV_OK){
++  gspProbe_poisoned=NV_TRUE;gspProbe_retainedDesc=desc;gspProbe_retainedMap=map;gspProbe_retainedPriv=priv;
++  NV_PRINTF(LEVEL_ERROR,"GSP power probe RPC failed: 0x%x; source retained until reboot\n",st);
++  return st;
++ }
++cleanup:
++ if(map!=NULL)memdescUnmapOld(desc,NV_TRUE,map,priv);
++ memdescFree(desc);memdescDestroy(desc);return st;
++}
++static NV_STATUS gspPowerProbe(OBJGPU *g,GSP_POWER_PROBE_PARAMS *p,NvU32 size)
++{
++ GSP_POWER_CONTEXT ctx={0};GSP_POWER_IO io={&ctx,gspPowerRead,gspPowerWrite};NV_STATUS st;
++ if(size!=sizeof(*p))return NV_ERR_INVALID_ARGUMENT;
++ p->stage=0;p->result=0;p->armed=0;p->active=0;p->poisoned=0;p->writes=0;
++ p->maxValue=p->feValue=p->upperValue=p->currentValue=0;
++ if(gspProbe_poisoned)gspPowerState.poisoned=1;
++ /* Leave ample DMA budget for the entire apply+restore sequence. */
++ if(gspProbe_callsUsed>GSP_READ_PROBE_MAX_CALLS-(p->operation==3?128:512)){st=NV_ERR_INVALID_STATE;goto output;}
++ ctx.gpu=g;ctx.page=portMemAllocNonPaged(sizeof(*ctx.page));
++ if(ctx.page==NULL){st=NV_ERR_NO_MEMORY;goto output;}
++ /* Root gate is in the dispatcher; metadata check enforces GPU/CC/WPR layout. */
++ portMemSet(ctx.page,0,sizeof(*ctx.page));ctx.page->version=4;
++ st=gspReadProbe(g,ctx.page,sizeof(*ctx.page));
++ if(st==NV_OK){
++  /* Bind once for the first identity write. The engine validates these offsets
++   * and every ownership link before gspPowerWrite can be reached. */
++  if(!gspPowerState.armed&&!gspPowerState.used&&!gspPowerState.poisoned){
++   gspPowerState.gpu=p->gpuOffset;gspPowerState.pmgr=p->pmgrOffset;gspPowerState.board=p->boardOffset;
++  }
++  if(p->operation==1)gspProbe_reserveRestore=NV_TRUE;
++  st=gspPowerEngine(&gspPowerState,&io,p);
++  if(st==NV_OK&&p->operation==3)gspProbe_reserveRestore=NV_FALSE;
++ }
++output:
++ p->result=st;p->poisoned=gspPowerState.poisoned||gspProbe_poisoned;
++ p->active=gspPowerState.active;p->armed=gspPowerState.armed;p->writes=gspPowerState.writes;
++ if(ctx.page!=NULL)portMemFree(ctx.page);
++ return NV_OK; /* Return experiment status in the ABI, even on a partial update. */
++}
