@@ -1,0 +1,2 @@
+# Patch files preserve upstream context lines, including blank-line prefixes.
+*.patch -whitespace

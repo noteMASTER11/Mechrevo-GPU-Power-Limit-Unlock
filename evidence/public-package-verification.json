@@ -1,0 +1,21 @@
+{
+  "status": "public_package_build_and_offline_tests_passed",
+  "nvidia_source": "61dcc93722ecb418bb5f2e00923f05b4b8051dd1",
+  "kernel": "7.2.6-1-cachyos",
+  "patch_sha256": "ddc74273503a3f31560c853388e429aa9da203b54c59fb5f9bc56f85baf7cc92",
+  "checks": [
+    "Fresh pinned checkout -> patch preparation -> full build",
+    "Repeated source preparation accepts exact patched tree",
+    "11 Python tests",
+    "cTGP engine and transaction client under ASan/UBSan",
+    "Local deployment preparation and strict manifest validation",
+    "Internal documentation and Wiki link validation"
+  ],
+  "live_installation_performed": false,
+  "public_package_boot_tested": false,
+  "original_v6_boot_and_owner_load_test": "See v6-first-boot.json and furmark-first-run.json",
+  "warnings": [
+    "Existing NVIDIA objtool diagnostics",
+    "Client header contains one unused static gspPowerEngine function"
+  ]
+}

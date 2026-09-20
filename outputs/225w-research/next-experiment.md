@@ -1,3 +1,5 @@
+> **Historical research checkpoint.** Status statements below describe that stage. See the [current guide](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/blob/main/docs/INSTALL.md) and [successful-run evidence](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/blob/main/evidence/README.md) for the working v6 result.
+
 # Current checkpoint and next experiment
 
 v5 completed seven live word writes: identity FE175000, three ceilings225000, three restores175000. Public INFO confirmed225000 then175000. CURRENT stayed145000. No Xid in the captured kernel journal; GPU remained responsive. See gsp-write-probe-v5/live-result.json.

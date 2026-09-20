@@ -1,3 +1,5 @@
+> **Historical research checkpoint.** Status statements below describe that stage. See the [current guide](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/blob/main/docs/INSTALL.md) and [successful-run evidence](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/blob/main/evidence/README.md) for the working v6 result.
+
 # Research index and original baseline
 
 The latest state is documented in [v5](gsp-write-probe-v5/README.md): live MAX/FE/UPPER writes225000→175000 succeeded. This index condenses earlier working notes in English.

@@ -1,3 +1,5 @@
+> **Historical research checkpoint.** Status statements below describe that stage. See the [current guide](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/blob/main/docs/INSTALL.md) and [successful-run evidence](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/blob/main/evidence/README.md) for the working v6 result.
+
 # v6: boot-scoped 225 W request and UCC Max TGP
 
 Status: built, tested and installed locally; **not booted or verified at 225 W yet**. The last live v5 result remains a successful 175→225→175 W ceiling roundtrip with CURRENT at 145 W.

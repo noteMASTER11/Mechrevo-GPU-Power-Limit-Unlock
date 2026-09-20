@@ -1,51 +1,62 @@
-# Mechrevo GPU Power Limit Unlock — Linux research
+# Mechrevo GPU Power Limit Unlock for Linux
 
-**Verified: live GSP MAX/FE/UPPER ceilings changed from 175 W to 225 W and restored to 175 W. Actual 225 W consumption under load is not verified yet.**
+**225 W GPU power-limit operation is working on the tested MECHREVO RTX 5080 Laptop.** The v6 driver reports CURRENT, MAX and UPPER at 225,000 mW; NVIDIA NVML subsequently reports an enforced power limit of 225 W. The owner confirmed successful operation in FurMark.
 
-On the tested MECHREVO RTX 5080 Laptop, NVIDIA public GET confirmed225000mW and then175000mW after restoration. CURRENT remained145000mW. The ceiling write is verified; a physical-power unlock remains unverified.
+This project documents how to access the GPU's GSP-managed power policies from Linux, inspect their limits, raise the validated board-power ceilings, and submit a new operating-power request through NVIDIA's own firmware handlers. It uses NVIDIA's open kernel module with the original GSP firmware. No hardware shunt modification or EEPROM flashing is involved.
 
-## Tested configuration
+**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The current implementation is deliberately tied to one verified hardware/firmware layout; it is not a universal RTX 50-series unlock.
 
-- MECHREVO YAOSHI Series-X6AR55xY, RTX 5080 Laptop (10de:2c19, subsystem1d05:6041).
-- CachyOS7.2.6-1-cachyos, NVIDIA open module/GSP615.71.09, VBIOS98.03.5E.00.5C.
-- Driver source base: NVIDIA/open-gpu-kernel-modules commit61dcc93722ecb418bb5f2e00923f05b4b8051dd1.
-- GSP firmware SHA256:c420726d2c76c55f028a59f67ebd7a906563ef807c945bb3baa9e88c36bf334b.
+## Read in this order
 
-## Prepared v6 boot experiment
+1. [Compatibility and prerequisites](docs/COMPATIBILITY.md): identify the GPU, driver and kernel; understand what is tested.
+2. [Installation and operation](docs/INSTALL.md): inspect stock limits, build the software, disable competing TGP controllers, prepare a separate boot entry, activate and verify.
+3. [Tool reference](docs/TOOLS.md): source components, commands and tests.
+4. [Wiki](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/wiki): GPU access, GSP policies, the exact mechanism, research history, porting and recovery.
+5. [Evidence](evidence/README.md): what the first successful run demonstrated and what was not measured.
 
-A dedicated 225 W boot request and UCC Max TGP ownership mode are now built and installed locally. **The v6 entry has not been booted yet; actual225W enforcement/draw remains unverified.** See [v6 protocol, UCC patch and recovery](outputs/225w-research/gsp-persistent-v6/README.md).
+## What changed
 
-## Start here
+| Value | Stock / before activation | Working v6 readback |
+|---|---:|---:|
+| Board policy effective MAX | 175 W | 225 W |
+| Board policy MAX source FE | 175 W | 225 W |
+| Platform UPPER | 175 W | 225 W |
+| Board policy CURRENT | Up to 175 W | 225 W |
+| NVML enforced power limit | 145–175 W, depending on state | 225 W |
 
-- [v5 live result](outputs/225w-research/gsp-write-probe-v5/live-result.json)
-- [v5 protocol, validation and recovery](outputs/225w-research/gsp-write-probe-v5/README.md)
-- [Complete driver patch](outputs/225w-research/gsp-write-probe-v5/gsp-write-probe-v5.patch)
-- [v4 object discovery](outputs/225w-research/gsp-read-probe-v4/README.md)
-- [Next experiment and research history](outputs/225w-research/next-experiment.md)
-- [Windows reference emulation](outputs/225w-research/windows-emulation/README.md)
+Raising MAX alone was insufficient. The successful sequence also invokes the internal cTGP offset handler (`0x20800ad3`) and cTGP mode handler (`0x20800ad2`), which generate the CURRENT/source F7 request. With UPPER = 225,000 mW and LOWER = 80,000 mW, the fixed offset is 145,000 mW. The Wiki explains why this is an **offset**, not a 145 W target or a rail-current setting.
 
-## What is in this checkpoint
+Before applying the unlock, disable any software or service that controls GPU TGP/power limits. A competing controller can overwrite the requested limit. No particular control-center application is required.
 
-Local experimental driver patches/helpers, C/Python tests, collectors, offline emulators, static-analysis notes, and sanitized result summaries. Directory names are retained to preserve research context. Historical v1–v4 and VBIOS records are explicitly historical; the VBIOS override caused artifacts and was abandoned. No EEPROM was flashed.
+## Tested machine
 
-Raw GPU heap dumps, NVLOG archives, machine journals, credentials, firmware/Windows executables, generated modules and initramfs images are intentionally excluded. Scripts requiring private dumps will need freshly captured fixtures. Absolute workspace paths are replaced by `/path/to/research-workspace`; archived deployment manifests are not portable installers. There is no turnkey installation command in this checkpoint.
+| Component | Verified configuration |
+|---|---|
+| Laptop | MECHREVO YAOSHI Series-X6AR55xY |
+| GPU | NVIDIA GeForce RTX 5080 Laptop GPU |
+| PCI ID / subsystem | `10de:2c19` / `1d05:6041` |
+| Distribution / kernel | CachyOS / `7.2.6-1-cachyos` |
+| NVIDIA open driver and GSP | `615.71.09` |
+| VBIOS | `98.03.5E.00.5C` |
+| Bootloader | Limine |
+| Cooling during owner test | Owner's water-cooled laptop setup |
 
-## v5 boundaries
+The first recorded FurMark run used OpenGL at 7680×4320 for 38.559 seconds and logged a maximum GPU temperature of 59 °C. It contains no sampled power trace. The 225 W policy readback, owner-reported load success and FurMark statistics are documented separately; this short run is not a long-term stability qualification.
 
-The root-only probe validates object ownership, subclass signatures, original values and exact hardware/firmware layout. It permits three aligned4-byte writes only (FE MAX, effective MAX, UPPER), a fixed225000 target, expected-value/readback checks and restore175000. Identity must succeed first; only one apply per boot is permitted. On uncertain RPC failure the DMA page is retained and further experimental DMA stops until reboot. Ordinary termination signals are deferred through the launcher’s write/restore transaction.
+## Repository layout
 
-CURRENT, voltages, rail limits and the dirty byte are not written by v5. Raising the reported MAX does not prove PMU enforcement or physical power. Do not remove the guards or reuse these offsets blindly on another machine/version. A failed or partial operation is not a confirmed rollback; the ordinary stock boot entry remains the recovery path.
+- `scripts/`, `src/`, `patches/`, `tests/`: maintained build/deployment software, runtime helpers, driver changes and checks. See [Tools](docs/TOOLS.md).
+- `docs/`: sequential instructions and compatibility notes.
+- `docs/wiki/`: version-controlled sources mirrored to the GitHub Wiki.
+- `evidence/`: sanitized successful-run records.
+- `outputs/225w-research/`, `work/`: preserved research checkpoints, including failed and superseded experiments. Their historical status statements describe those experiments, not the project's current result.
 
-## Evidence
+Firmware, raw GPU heap dumps, private machine logs and kernel/initramfs binaries are not bundled. Build from the pinned source and use your installed matching firmware. Archived deployment manifests with `/path/to/research-workspace` are records, not commands to execute; use the current installation guide.
 
-Seven GPU word writes succeeded: one identity write, three increases, three restorations. Public INFO reported225000 then175000. No Xid appeared in the captured kernel journal. Tests cover whole-fixture restoration, malformed ownership/ABI inputs, write/readback faults, reserved rollback budget, and real subprocess interruption behavior. Review-discovered budget/state-reporting and signal-handling defects were fixed before the live test.
+## Operating boundaries
 
-## References
+The probe validates the exact GPU, ownership links, policy signatures and expected starting values. It offers a fixed 225 W activation and explicit restoration, not arbitrary memory writes or unrestricted power sliders. Failed or uncertain RPCs stop further mutation. The ordinary stock boot entry remains the recovery path.
 
-- https://github.com/LevinAi-arch/rtx-5070ti-laptop-160w-power-limit
-- https://github.com/nanomatters/uniwill-laptop-driver
-- https://github.com/b00nz/mVolt
-- https://github.com/Loong0x00/nvidia-tools
-- https://github.com/NVIDIA/open-gpu-kernel-modules
+Activation runs once on each selected dedicated boot. Continued operation after suspend, GPU reset, firmware override or driver/kernel updates is not established. Those cases require fresh validation rather than automatic retries or removal of guards.
 
-This checkpoint was published at the owner's explicit request after the reversible ceiling-write result. Earlier notes saying publication was deferred describe the previous research stage.
+See [component licensing](LICENSES.md) and [contribution guidelines](CONTRIBUTING.md) before redistributing modifications or proposing support for another machine.

@@ -12,3 +12,6 @@ __pycache__/
 *.log
 **/live/
 **/modules-root/
+
+# Generated build and deployment assets
+/build/
