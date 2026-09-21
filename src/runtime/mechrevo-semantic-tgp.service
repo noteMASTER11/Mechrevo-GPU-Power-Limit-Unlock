@@ -1,0 +1,17 @@
+[Unit]
+Description=Mechrevo semantic GSP TGP resolver
+ConditionKernelCommandLine=codex.semantic_tgp=250
+After=nvidia-powerd.service nvidia-persistenced.service uccd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python /usr/local/lib/mechrevo-semantic-tgp/run_boot.py
+RemainAfterExit=yes
+Restart=no
+TimeoutStartSec=0
+UMask=0077
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

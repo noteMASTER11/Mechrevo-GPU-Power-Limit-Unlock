@@ -1,0 +1,1390 @@
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index df5a5e0..5ff2117 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -119,6 +119,9 @@
+ MODULE_LICENSE("Dual MIT/GPL");
+ 
+ MODULE_INFO(supported, "external");
++MODULE_INFO(gsp_read_probe, "semantic-tgp-v8-20260922");
++static char *gsp_read_probe_build = "semantic-tgp-v8-20260922";
++module_param_named(GspReadProbeBuild, gsp_read_probe_build, charp, 0444);
+ MODULE_VERSION(NV_VERSION_STRING);
+ MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
+ MODULE_ALIAS_CHARDEV_MAJOR(NV_MAJOR_DEVICE_NUMBER);
+diff --git a/research/SEMANTIC_RESOLVER.md b/research/SEMANTIC_RESOLVER.md
+new file mode 100644
+index 0000000..a0519b7
+--- /dev/null
++++ b/research/SEMANTIC_RESOLVER.md
+@@ -0,0 +1,45 @@
++# Semantic GSP power resolver
++
++This directory contains the portable reference implementation used by the v8
++NVIDIA owner adapter. The production entry point is
++`gs_resolve_autonomous()`. It accepts only a bounded read callback and the
++current GSP heap size; user space does not supply addresses, object offsets,
++stock wattages, or a driver-version profile.
++
++The resolver fails closed unless it finds exactly one coherent topology made
++from all of these independent witnesses:
++
++- a board-power selector record with one `0xfe` source and matching effective
++  and source values;
++- a cTGP tuple for policy index 2 whose lower and upper values are represented
++  by selector defaults;
++- a 20-slot policy-pointer array with at least eight active objects;
++- a unique common member that identifies every active object by its array
++  index;
++- a unique link between policy slot 2, the board selector, and the cTGP tuple.
++
++`semantic_core.c` has no NVIDIA kernel dependencies. `gsp_semantic_adapter.inc`
++compiles that same source inside the matching open NVIDIA module and supplies
++the protected-memory reader owned by RM/GSP.
++
++## Offline checks
++
++The Python tests use the private local capture and are therefore intended for
++the research host only:
++
++```sh
++python research/test_semantic_resolver.py
++```
++
++The C test accepts the two heap pieces and the public `0xa618` policy response:
++
++```sh
++cc -O2 -Wall -Wextra -Werror \
++  research/semantic_core.c research/test_semantic_core.c \
++  -o /tmp/test-semantic-core
++/tmp/test-semantic-core page0.bin pages1-1024.bin public-a618.bin
++```
++
++Raw protected-memory captures are deliberately excluded from source control.
++The live v8 boot entry must still be validated on hardware before its runtime
++path is described as verified.
+diff --git a/research/query_power.c b/research/query_power.c
+new file mode 100644
+index 0000000..7c07232
+--- /dev/null
++++ b/research/query_power.c
+@@ -0,0 +1,68 @@
++#define _GNU_SOURCE
++#include <dlfcn.h>
++#include <stdarg.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++#include <signal.h>
++#include "nvtypes.h"
++#include "nvstatus.h"
++#include "deprecated/gsp_power_probe.h"
++typedef struct {uint32_t client,object,cmd,flags;uint64_t params;uint32_t size,status;} Control;
++_Static_assert(sizeof(Control)==32,"NVOS54");
++_Static_assert(sizeof(GSP_POWER_PROBE_PARAMS)==120,"semantic power ABI");
++
++static int command(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,
++                   unsigned operation,unsigned target,unsigned stock,GSP_POWER_PROBE_PARAMS *out){
++ GSP_POWER_PROBE_PARAMS p={.version=GSP_POWER_PROBE_VERSION,.operation=operation,.targetMw=target};
++ Control q=*info;q.cmd=GSP_POWER_PROBE_CMD;q.params=(uintptr_t)&p;q.size=sizeof(p);q.status=0;
++ int rc=next(fd,req,&q);
++ fprintf(stderr,"GSP_SEMANTIC {\"op\":%u,\"rc\":%d,\"status\":%u,\"result\":%u,\"stage\":%u,\"resolver\":%u,\"armed\":%u,\"active\":%u,\"poisoned\":%u,\"writes\":%u,\"stock\":%u,\"current\":%u,\"heap_source\":\"0x%llx\",\"heap_size\":%llu,\"va_base\":\"0x%llx\",\"array\":\"0x%llx\",\"board\":\"0x%llx\",\"writers\":[\"0x%llx\",\"0x%llx\",\"0x%llx\"]}\n",
++  operation,rc,q.status,p.result,p.stage,p.resolverStatus,p.armed,p.active,p.poisoned,p.writes,
++  p.stockUpperMw,p.currentUpperMw,(unsigned long long)p.heapSource,(unsigned long long)p.heapSize,
++  (unsigned long long)p.vaBase,(unsigned long long)p.policyArray,(unsigned long long)p.boardObject,
++  (unsigned long long)p.maxEffectiveMember,(unsigned long long)p.maxSourceMember,(unsigned long long)p.pmgrUpperMember);
++ if(out)*out=p;
++ if(rc||q.status||p.result||p.stage!=100||p.poisoned||p.resolverStatus||p.version!=GSP_POWER_PROBE_VERSION)return -1;
++ if(operation==1&&p.currentUpperMw!=stock)return -1;
++ if(operation>=2&&p.currentUpperMw!=target)return -1;
++ if(operation==0&&(p.armed||p.active||p.writes))return -1;
++ if(operation==1&&(!p.armed||p.active||p.writes))return -1;
++ if(operation==2&&(!p.armed||p.active||p.writes!=3))return -1;
++ if(operation==6&&(!p.armed||!p.active||p.writes!=3))return -1;
++ return 0;
++}
++static int run_power(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,unsigned target,int activate){
++ GSP_POWER_PROBE_PARAMS p;
++ if(command(next,fd,req,info,0,target,0,&p))return -1;
++ unsigned stock=p.stockUpperMw;if(stock<50000||stock>=target)return -1;
++ if(!activate)return 0;
++ if(command(next,fd,req,info,1,target,stock,NULL))return -1;
++ if(command(next,fd,req,info,2,target,stock,NULL))return -1;
++ return command(next,fd,req,info,6,target,stock,NULL);
++}
++#ifndef PROBE_TEST
++static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
++ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8-20260922\n");if(f)fclose(f);return ok;}
++int ioctl(int fd,unsigned long req,...){
++ static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
++ va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;
++ if(!once&&!rc&&arg&&_IOC_TYPE(req)=='F'&&_IOC_NR(req)==0x2a&&_IOC_SIZE(req)==32){Control *info=arg;
++  if(info->cmd==0x2080a618&&info->size==20512&&!info->status){
++   once=1;const char *mode=getenv("CODEX_GSP_POWER_MODE"),*value=getenv("CODEX_GSP_TARGET_MW");char *end=NULL;
++   unsigned long target=value?strtoul(value,&end,10):0;int activate=mode&&!strcmp(mode,"activate");
++   if(geteuid()!=0||!marker_ok()||!mode||(!activate&&strcmp(mode,"inspect"))||!value||!*value||*end||target<200000||target>300000){fprintf(stderr,"GSP_SEMANTIC ERROR preflight\n");goto done;}
++   sigset_t blocked,old;sigemptyset(&blocked);sigaddset(&blocked,SIGINT);sigaddset(&blocked,SIGTERM);sigaddset(&blocked,SIGHUP);
++   if(sigprocmask(SIG_BLOCK,&blocked,&old)){fprintf(stderr,"GSP_SEMANTIC ERROR signal mask\n");goto done;}
++   int result=run_power(next,fd,req,info,(unsigned)target,activate);
++   fprintf(stderr,"GSP_SEMANTIC %s mode=%s target=%lu\n",result?"ERROR":"SUCCESS",mode,target);
++   sigprocmask(SIG_SETMASK,&old,NULL);
++  }
++ }
++done:errno=saved;return rc;
++}
++#endif
+diff --git a/research/semantic_core.c b/research/semantic_core.c
+new file mode 100644
+index 0000000..36b8f21
+--- /dev/null
++++ b/research/semantic_core.c
+@@ -0,0 +1,227 @@
++/* SPDX-License-Identifier: MIT
++ * Address-free, offset-free semantic resolver reference core.
++ */
++#include "semantic_core.h"
++
++#define POLICY_SLOTS 20U
++#define PREFIX_LIMIT 0x1000U
++#define IDENTITY_LIMIT 0x80U
++#define CANDIDATE_LIMIT 64U
++
++static int rd(const struct gs_io *io, uint64_t o, void *p, uint32_t n)
++{
++    if (n > io->heap_size || o > io->heap_size - n) return GS_INVALID;
++    return io->read(io->context, o, p, n) ? GS_IO : GS_OK;
++}
++static int r8(const struct gs_io *io, uint64_t o, uint8_t *v) { return rd(io,o,v,1); }
++static int r16(const struct gs_io *io, uint64_t o, uint16_t *v) { return rd(io,o,v,2); }
++static int r32(const struct gs_io *io, uint64_t o, uint32_t *v) { return rd(io,o,v,4); }
++static int r64(const struct gs_io *io, uint64_t o, uint64_t *v) { return rd(io,o,v,8); }
++static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
++static uint64_t le64(const uint8_t *p) { return (uint64_t)le32(p)|((uint64_t)le32(p+4)<<32); }
++
++static int same(const struct gs_resolution *a, const struct gs_resolution *b)
++{
++    return a->va_base==b->va_base&&a->policy_array==b->policy_array&&
++        a->board_object==b->board_object&&a->selector==b->selector&&
++        a->lower_selector==b->lower_selector&&a->ctgp_tuple==b->ctgp_tuple&&
++        a->index_member==b->index_member&&a->type_member==b->type_member&&
++        a->id_member==b->id_member&&a->unit_member==b->unit_member&&
++        a->board_max_effective==b->board_max_effective&&
++        a->board_max_source==b->board_max_source&&a->pmgr_upper==b->pmgr_upper&&
++        a->stock_upper_mw==b->stock_upper_mw&&a->current_upper_mw==b->current_upper_mw;
++}
++
++struct selector_candidate { uint64_t offset; uint32_t effective,stock; };
++struct ctgp_candidate { uint64_t offset; uint32_t lower,upper; };
++
++int gs_resolve_autonomous(const struct gs_io *io, struct gs_resolution *out)
++{
++    struct selector_candidate selectors[CANDIDATE_LIMIT];
++    struct ctgp_candidate ctgps[CANDIDATE_LIMIT];
++    uint32_t ns=0,nc=0,solutions=0;struct gs_resolution answer={0};int st;
++    if(!io||!io->read||!out||io->heap_size<0x10000||io->heap_size>GS_HEAP_LIMIT)return GS_INVALID;
++    for(uint64_t o=0;o+20<=io->heap_size;o+=4){
++        uint8_t window[20],mode,count,source;uint32_t first,effective,stock,source_value;
++        if((st=rd(io,o,window,sizeof(window))))return st;
++        mode=window[0];count=window[1];source=window[12];first=le32(window);
++        effective=le32(window+4);stock=le32(window+8);source_value=le32(window+16);
++        if(mode==0&&count==1&&source==0xfe&&effective==source_value&&
++           stock>=20000&&stock<=effective&&effective<=400000){
++            if(ns==CANDIDATE_LIMIT)return GS_BUDGET;
++            selectors[ns++]=(struct selector_candidate){o,effective,stock};
++        }
++        if(first==2&&effective>=20000&&effective<=stock&&stock<=400000){
++            if(nc==CANDIDATE_LIMIT)return GS_BUDGET;
++            ctgps[nc++]=(struct ctgp_candidate){o,effective,stock};
++        }
++    }
++    if(!ns||!nc)return GS_NOT_FOUND;
++
++    /* A cTGP bound must be independently represented by selector defaults. */
++    for(uint32_t c=0;c<nc;c++){
++        int lo=0,hi=0;for(uint32_t s=0;s<ns;s++){
++            if(selectors[s].stock==ctgps[c].lower||selectors[s].effective==ctgps[c].lower)lo=1;
++            if(selectors[s].stock==ctgps[c].upper||selectors[s].effective==ctgps[c].upper)hi=1;
++        }
++        if(!lo||!hi)ctgps[c].offset=~0ULL;
++    }
++
++    /* Candidate arrays are discovered from shape, then accepted only if all
++     * non-null entries resolve to heap objects with one common index member. */
++    for(uint64_t array=0;array+POLICY_SLOTS*8<=io->heap_size;array+=8){
++        uint8_t window[POLICY_SLOTS*8];uint64_t raw[POLICY_SLOTS],lo=~0ULL,hi=0;uint32_t active=0;int shape=1;
++        if((st=rd(io,array,window,sizeof(window))))return st;
++        for(uint32_t i=0;i<POLICY_SLOTS;i++){
++            raw[i]=le64(window+i*8);
++            if(raw[i]){if(raw[i]&7){shape=0;break;}if(raw[i]<lo)lo=raw[i];if(raw[i]>hi)hi=raw[i];active++;}
++        }
++        if(!shape||active<8||!raw[2]||hi-lo>=io->heap_size)continue;
++        for(uint32_t s=0;s<ns;s++){
++            uint64_t selector=selectors[s].offset,first=selector>PREFIX_LIMIT?selector-PREFIX_LIMIT:0;
++            uint64_t board=(first&~0xfffULL)|(raw[2]&0xfffULL);
++            if(board<first)board+=0x1000;
++            for(;board<=selector;board+=0x1000){
++                uint64_t base=raw[2]-board,objects[POLICY_SLOTS]={0};uint32_t im=0,im_count=0;int good=1;
++                if(!base||(base&0xfff))continue;
++                for(uint32_t i=0;i<POLICY_SLOTS;i++)if(raw[i]){
++                    if(raw[i]<base||raw[i]-base>=io->heap_size){good=0;break;}objects[i]=raw[i]-base;
++                }
++                if(!good||objects[2]!=board)continue;
++                for(uint32_t member=0;member<IDENTITY_LIMIT;member++){
++                    int match=1;for(uint32_t i=0;i<POLICY_SLOTS;i++)if(raw[i]){
++                        uint8_t value;if((st=r8(io,objects[i]+member,&value)))return st;
++                        if(value!=i){match=0;break;}
++                    }
++                    if(match){im=member;im_count++;}
++                }
++                if(im_count!=1)continue;
++                for(uint32_t i=0;i<POLICY_SLOTS;i++)if(raw[i]){
++                    uint16_t value;if((st=r16(io,objects[i]+im,&value)))return st;
++                    if(value!=i){good=0;break;}
++                }
++                if(!good||selector<board||selector>=board+PREFIX_LIMIT)continue;
++                {
++                    uint32_t links=0;uint64_t lower_selector=0,ctgp=0;
++                    for(uint32_t c=0;c<nc;c++)if(ctgps[c].offset!=~0ULL&&ctgps[c].upper==selectors[s].effective){
++                        uint32_t lower_hits=0;uint64_t lower_at=0;
++                        for(uint32_t q=0;q<ns;q++)if((selectors[q].stock==ctgps[c].lower||selectors[q].effective==ctgps[c].lower)&&
++                            selectors[q].offset>=board&&selectors[q].offset<board+PREFIX_LIMIT){lower_hits++;lower_at=selectors[q].offset;}
++                        if(lower_hits==1){links++;lower_selector=lower_at;ctgp=ctgps[c].offset;}
++                    }
++                    if(links==1){
++                        uint32_t current;if((st=r32(io,ctgp+8,&current)))return st;
++                        struct gs_resolution candidate={0};
++                        candidate.va_base=base;candidate.policy_array=array;candidate.board_object=board;
++                        candidate.selector=selector;candidate.lower_selector=lower_selector;candidate.ctgp_tuple=ctgp;
++                        candidate.index_member=im;candidate.type_member=candidate.id_member=candidate.unit_member=~0U;
++                        candidate.board_max_effective=selector+4;candidate.board_max_source=selector+16;
++                        candidate.pmgr_upper=ctgp+8;candidate.stock_upper_mw=selectors[s].stock;
++                        candidate.current_upper_mw=current;
++                        if(!solutions){answer=candidate;solutions=1;}
++                        else if(!same(&answer,&candidate))solutions++;
++                    }
++                }
++            }
++        }
++    }
++    if(!solutions)return GS_NOT_FOUND;
++    if(solutions!=1)return GS_AMBIGUOUS;
++    *out=answer;
++    return GS_OK;
++}
++
++int gs_resolve(const struct gs_io *io, uint32_t mask,
++               const struct gs_policy *ps, uint32_t n,
++               struct gs_resolution *out)
++{
++    uint64_t selectors[CANDIDATE_LIMIT], arrays[CANDIDATE_LIMIT], ctgps[CANDIDATE_LIMIT];
++    uint32_t ns=0, na=0, nc=0, i, j, board_slot=~0U, expected_mask=0;
++    uint32_t board_lower=0, board_upper=0, solutions=0;
++    struct gs_resolution answer={0};
++    int st;
++    if (!io || !io->read || !ps || !out || n==0 || n>GS_POLICY_LIMIT ||
++        io->heap_size<0x10000 || io->heap_size>GS_HEAP_LIMIT || (mask>>POLICY_SLOTS)) return GS_INVALID;
++    for(i=0;i<n;i++) {
++        if (ps[i].index>=POLICY_SLOTS || ps[i].lower_mw>ps[i].upper_mw ||
++            (expected_mask&(1U<<ps[i].index))) return GS_INVALID;
++        expected_mask|=1U<<ps[i].index;
++        if(ps[i].index==2){board_slot=i;board_lower=ps[i].lower_mw;board_upper=ps[i].upper_mw;}
++    }
++    if(expected_mask!=mask || board_slot==~0U)return GS_INVALID;
++
++    /* Pass 1: semantic records. */
++    for(uint64_t o=0;o+20<=io->heap_size;o+=4){
++        uint8_t mode,count,source;uint32_t first,effective,stock,source_value;
++        if((st=r8(io,o,&mode))||(st=r8(io,o+1,&count))||(st=r32(io,o+4,&effective))||
++           (st=r32(io,o,&first))||(st=r32(io,o+8,&stock))||(st=r8(io,o+12,&source))||
++           (st=r32(io,o+16,&source_value)))return st;
++        if(mode==0&&count==1&&stock==board_upper&&source==0xfe&&effective==source_value&&
++           effective>=board_upper&&effective<=400000){
++            if(ns==CANDIDATE_LIMIT)return GS_BUDGET;
++            selectors[ns++]=o;
++        }
++        if(first==2&&effective==board_lower&&stock>=board_upper&&stock<=400000){
++            if(nc==CANDIDATE_LIMIT)return GS_BUDGET;
++            ctgps[nc++]=o;
++        }
++    }
++    if(ns==0||nc==0)return GS_NOT_FOUND;
++
++    /* Pass 2: arrays whose null/non-null shape exactly follows public mask. */
++    for(uint64_t o=0;o+POLICY_SLOTS*8<=io->heap_size;o+=8){
++        uint64_t lo=~0ULL,hi=0,p;int good=1;
++        for(i=0;i<POLICY_SLOTS;i++){
++            if((st=r64(io,o+i*8,&p)))return st;
++            if(mask&(1U<<i)){if(!p||(p&7)){good=0;break;}if(p<lo)lo=p;if(p>hi)hi=p;}
++            else if(p){good=0;break;}
++        }
++        if(good&&hi-lo<io->heap_size){if(na==CANDIDATE_LIMIT)return GS_BUDGET;arrays[na++]=o;}
++    }
++    if(na==0)return GS_NOT_FOUND;
++
++    for(uint32_t si=0;si<ns;si++)for(uint32_t ai=0;ai<na;ai++){
++        uint64_t selector=selectors[si],array=arrays[ai],board_va,first;
++        if((st=r64(io,array+16,&board_va)))return st;
++        first=selector>PREFIX_LIMIT?selector-PREFIX_LIMIT:0; first=(first+7)&~7ULL;
++        for(uint64_t board=first;board<=selector;board+=8){
++            uint64_t base=board_va-board,objects[POLICY_SLOTS]={0};int good=1;
++            uint32_t im[4]={0},counts[4]={0};
++            if(!base||(base&0xfff))continue;
++            for(i=0;i<n;i++){
++                uint64_t p;if((st=r64(io,array+ps[i].index*8,&p)))return st;
++                if(p<base||p-base>=io->heap_size){good=0;break;}objects[ps[i].index]=p-base;
++            }
++            if(!good||objects[2]!=board)continue;
++            for(uint32_t member=0;member<IDENTITY_LIMIT;member++){
++                int match[4]={1,1,1,1};
++                for(i=0;i<n;i++){
++                    uint8_t v;if((st=r8(io,objects[ps[i].index]+member,&v)))return st;
++                    if(v!=ps[i].index)match[0]=0;
++                    if(v!=ps[i].type)match[1]=0;
++                    if(v!=ps[i].id)match[2]=0;
++                    if(v!=ps[i].unit)match[3]=0;
++                }
++                for(j=0;j<4;j++)if(match[j]){im[j]=member;counts[j]++;}
++            }
++            if(counts[0]!=1||counts[1]!=1||counts[2]!=1||counts[3]!=1||
++               im[0]==im[1]||im[0]==im[2]||im[0]==im[3]||im[1]==im[2]||
++               im[1]==im[3]||im[2]==im[3])continue;
++            for(i=0;i<n;i++){uint16_t v;if((st=r16(io,objects[ps[i].index]+im[0],&v)))return st;if(v!=ps[i].index){good=0;break;}}
++            if(!good||selector<board||selector>=board+PREFIX_LIMIT)continue;
++            /* A coherent topology must contain exactly one cTGP tuple. */
++            if(nc!=1)continue;
++            {
++                uint32_t current;if((st=r32(io,ctgps[0]+8,&current)))return st;
++                struct gs_resolution candidate={base,array,board,selector,0,ctgps[0],
++                    im[0],im[1],im[2],im[3],selector+4,selector+16,ctgps[0]+8,
++                    board_upper,current};
++                if(solutions==0){answer=candidate;solutions=1;}
++                else if(!same(&answer,&candidate))solutions++;
++            }
++        }
++    }
++    if(solutions==0)return GS_NOT_FOUND;
++    if(solutions!=1)return GS_AMBIGUOUS;
++    *out=answer;return GS_OK;
++}
+diff --git a/research/semantic_core.h b/research/semantic_core.h
+new file mode 100644
+index 0000000..a132edc
+--- /dev/null
++++ b/research/semantic_core.h
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef CODEX_GSP_SEMANTIC_CORE_H
++#define CODEX_GSP_SEMANTIC_CORE_H
++
++#ifndef GS_EXTERNAL_TYPES
++#include <stdint.h>
++#endif
++
++#define GS_POLICY_LIMIT 32U
++#define GS_HEAP_LIMIT (256ULL * 1024ULL * 1024ULL)
++
++enum gs_status {
++    GS_OK = 0,
++    GS_INVALID = 1,
++    GS_IO = 2,
++    GS_NOT_FOUND = 3,
++    GS_AMBIGUOUS = 4,
++    GS_BUDGET = 5
++};
++
++struct gs_policy {
++    uint8_t index, type, id, unit;
++    uint32_t lower_mw, upper_mw;
++};
++
++struct gs_io {
++    void *context;
++    int (*read)(void *context, uint64_t offset, void *destination, uint32_t size);
++    uint64_t heap_size;
++};
++
++struct gs_resolution {
++    uint64_t va_base, policy_array, board_object, selector, lower_selector, ctgp_tuple;
++    uint32_t index_member, type_member, id_member, unit_member;
++    uint64_t board_max_effective, board_max_source, pmgr_upper;
++    uint32_t stock_upper_mw, current_upper_mw;
++};
++
++/* Primary production path: no caller-supplied addresses, offsets, policy
++ * records, stock limits or driver-version profile. */
++int gs_resolve_autonomous(const struct gs_io *io, struct gs_resolution *out);
++
++int gs_resolve(const struct gs_io *io, uint32_t public_mask,
++               const struct gs_policy *policies, uint32_t policy_count,
++               struct gs_resolution *out);
++
++#endif
+diff --git a/research/semantic_resolver.py b/research/semantic_resolver.py
+new file mode 100644
+index 0000000..17ab2e1
+--- /dev/null
++++ b/research/semantic_resolver.py
+@@ -0,0 +1,283 @@
++#!/usr/bin/env python3
++"""Fail-closed semantic resolver for the GSP-RM power-policy graph.
++
++This is the executable reference model for the in-kernel resolver.  It does
++not accept object addresses or member offsets.  The public policy description
++is the oracle for policy identity and numeric bounds; all private heap
++locations are inferred from the current heap image.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass, asdict
++import struct
++
++POLICY_COUNT = 20
++MAX_HEAP_SIZE = 256 * 1024 * 1024
++MAX_OBJECT_PREFIX = 0x1000
++MAX_IDENTITY_PREFIX = 0x80
++
++
++class ResolveError(RuntimeError):
++    pass
++
++
++@dataclass(frozen=True)
++class PublicPolicy:
++    index: int
++    policy_type: int
++    policy_id: int
++    unit: int
++    lower: int
++    upper: int
++
++
++@dataclass(frozen=True)
++class Resolution:
++    va_base: int
++    policy_array: int
++    board_object: int
++    selector: int
++    ctgp_tuple: int
++    index_member: int
++    type_member: int
++    id_member: int
++    unit_member: int
++    board_max_effective: int
++    board_max_source: int
++    pmgr_upper: int
++    stock_upper_mw: int
++    current_upper_mw: int
++
++    def as_dict(self):
++        return asdict(self)
++
++
++def parse_public_fixture(blob: bytes) -> tuple[int, list[PublicPolicy]]:
++    """Decode the captured A618 ABI for tests.
++
++    Production code gets these fields from the matching NVIDIA control
++    structure, so this fixture adapter is deliberately kept out of the core.
++    """
++    if len(blob) < 0xCC + POLICY_COUNT * 0x104:
++        raise ResolveError("public policy response is truncated")
++    mask = struct.unpack_from("<I", blob, 4)[0]
++    if mask >> POLICY_COUNT:
++        raise ResolveError("public policy mask has unsupported high bits")
++    policies = []
++    for index in range(POLICY_COUNT):
++        off = 0xCC + index * 0x104
++        if mask & (1 << index):
++            policy_type, policy_id, unit = blob[off + 4 : off + 7]
++            lower, upper = struct.unpack_from("<II", blob, off + 12)
++            if lower > upper:
++                raise ResolveError(f"public policy {index} has inverted bounds")
++            policies.append(PublicPolicy(index, policy_type, policy_id, unit, lower, upper))
++        elif any(blob[off : off + 0x20]):
++            raise ResolveError(f"inactive public policy {index} is not empty")
++    if not policies or not any(p.index == 2 for p in policies):
++        raise ResolveError("public board-power policy 2 is absent")
++    return mask, policies
++
++
++def resolve(heap: bytes, mask: int, policies: list[PublicPolicy]) -> Resolution:
++    if not 0x10000 <= len(heap) <= MAX_HEAP_SIZE:
++        raise ResolveError("heap size is outside the bounded resolver range")
++    if mask != sum(1 << p.index for p in policies):
++        raise ResolveError("public mask and policy list disagree")
++    by_index = {p.index: p for p in policies}
++    if len(by_index) != len(policies) or 2 not in by_index:
++        raise ResolveError("public policy identities are incomplete")
++    board_public = by_index[2]
++
++    def u16(off: int) -> int:
++        return struct.unpack_from("<H", heap, off)[0]
++
++    def u32(off: int) -> int:
++        return struct.unpack_from("<I", heap, off)[0]
++
++    def u64(off: int) -> int:
++        return struct.unpack_from("<Q", heap, off)[0]
++
++    # A selector is described by behavior, source identity and the public
++    # stock ceiling.  Its location relative to an object is not assumed.
++    selectors = []
++    for off in range(0, len(heap) - 20, 4):
++        effective = u32(off + 4)
++        if (heap[off] == 0 and heap[off + 1] == 1 and
++                u32(off + 8) == board_public.upper and
++                heap[off + 12] == 0xFE and u32(off + 16) == effective and
++                board_public.upper <= effective <= 400_000):
++            selectors.append(off)
++    if not selectors:
++        raise ResolveError("no semantic board ceiling selector")
++
++    # Locate policy pointer arrays by their public active mask.  Pointer
++    # values are not interpreted until a VA base is inferred from policy 2.
++    active = [p.index for p in policies]
++    inactive = [i for i in range(POLICY_COUNT) if not mask & (1 << i)]
++    arrays = []
++    span = POLICY_COUNT * 8
++    for off in range(0, len(heap) - span + 1, 8):
++        if any(u64(off + i * 8) != 0 for i in inactive):
++            continue
++        pointers = [u64(off + i * 8) for i in active]
++        if any(p == 0 or p & 7 for p in pointers):
++            continue
++        if max(pointers) - min(pointers) >= len(heap):
++            continue
++        arrays.append(off)
++    if not arrays:
++        raise ResolveError("no policy-array shape matches the public mask")
++
++    resolutions = []
++    for selector in selectors:
++        first_board = max(0, selector - MAX_OBJECT_PREFIX)
++        for array in arrays:
++            board_va = u64(array + 2 * 8)
++            for board in range((first_board + 7) & ~7, selector + 1, 8):
++                va_base = board_va - board
++                if va_base <= 0 or va_base & 0xFFF:
++                    continue
++                objects = {}
++                valid = True
++                for p in policies:
++                    ptr = u64(array + p.index * 8)
++                    if ptr < va_base or ptr - va_base >= len(heap):
++                        valid = False
++                        break
++                    objects[p.index] = ptr - va_base
++                if not valid or objects[2] != board:
++                    continue
++
++                # Discover each identity member independently and require a
++                # unique common offset across every active policy object.
++                index_members = []
++                type_members = []
++                id_members = []
++                unit_members = []
++                for member in range(MAX_IDENTITY_PREFIX):
++                    if all(o + member < len(heap) for o in objects.values()):
++                        if all(heap[o + member] == p.index for p in policies for o in [objects[p.index]]):
++                            index_members.append(member)
++                        if all(heap[o + member] == p.policy_type for p in policies for o in [objects[p.index]]):
++                            type_members.append(member)
++                        if all(heap[o + member] == p.policy_id for p in policies for o in [objects[p.index]]):
++                            id_members.append(member)
++                        if all(heap[o + member] == p.unit for p in policies for o in [objects[p.index]]):
++                            unit_members.append(member)
++                if not all(len(x) == 1 for x in (index_members, type_members, id_members, unit_members)):
++                    continue
++                members = (index_members[0], type_members[0], id_members[0], unit_members[0])
++                if len(set(members)) != 4:
++                    continue
++                # Index is stored as a word in the observed class hierarchy;
++                # checking the upper byte prevents a byte-sized false match.
++                if any(u16(objects[p.index] + members[0]) != p.index for p in policies):
++                    continue
++
++                # The selected record must belong to the uniquely identified
++                # board policy object, without assuming its relative offset.
++                if not board <= selector < min(len(heap), board + MAX_OBJECT_PREFIX):
++                    continue
++
++                # cTGP data is linked semantically to public policy 2 bounds.
++                ctgp = []
++                for q in range(0, len(heap) - 12, 4):
++                    upper = u32(q + 8)
++                    if (u32(q) == 2 and u32(q + 4) == board_public.lower and
++                            board_public.upper <= upper <= 400_000):
++                        ctgp.append(q)
++                if len(ctgp) != 1:
++                    continue
++
++                resolutions.append(Resolution(
++                    va_base=va_base, policy_array=array, board_object=board,
++                    selector=selector, ctgp_tuple=ctgp[0],
++                    index_member=members[0], type_member=members[1],
++                    id_member=members[2], unit_member=members[3],
++                    board_max_effective=selector + 4,
++                    board_max_source=selector + 16,
++                    pmgr_upper=ctgp[0] + 8,
++                    stock_upper_mw=board_public.upper,
++                    current_upper_mw=u32(ctgp[0] + 8)))
++
++    # Deduplicate candidates reached through equivalent scan paths.
++    unique = list(dict.fromkeys(resolutions))
++    if len(unique) != 1:
++        raise ResolveError(f"semantic topology count is {len(unique)}, expected exactly 1")
++    return unique[0]
++
++
++def resolve_autonomous(heap: bytes) -> Resolution:
++    """Resolve from private heap semantics alone.
++
++    This is the primary model.  It accepts no stock wattage, object address,
++    member offset, public-policy ABI blob or driver-version selector.
++    """
++    if not 0x10000 <= len(heap) <= MAX_HEAP_SIZE:
++        raise ResolveError("heap size is outside the bounded resolver range")
++    size = len(heap)
++    u16 = lambda o: struct.unpack_from('<H', heap, o)[0]
++    u32 = lambda o: struct.unpack_from('<I', heap, o)[0]
++    u64 = lambda o: struct.unpack_from('<Q', heap, o)[0]
++    selectors = []
++    tuples = []
++    for off in range(0, size - 20, 4):
++        effective, default, source_value = u32(off + 4), u32(off + 8), u32(off + 16)
++        if (heap[off] == 0 and heap[off + 1] == 1 and heap[off + 12] == 0xFE and
++                effective == source_value and 20_000 <= default <= effective <= 400_000):
++            selectors.append((off, effective, default))
++        first = u32(off)
++        if first == 2 and 20_000 <= effective <= default <= 400_000:
++            tuples.append((off, effective, default))
++    if not selectors or not tuples:
++        raise ResolveError("selector/cTGP semantics are absent")
++    selector_values = {v for _o, effective, default in selectors for v in (effective, default)}
++    tuples = [x for x in tuples if x[1] in selector_values and x[2] in selector_values]
++    if not tuples:
++        raise ResolveError("no cTGP tuple is linked to selector defaults")
++
++    found = []
++    for array in range(0, size - POLICY_COUNT * 8 + 1, 8):
++        raw = [u64(array + i * 8) for i in range(POLICY_COUNT)]
++        pointers = [p for p in raw if p]
++        if (len(pointers) < 8 or not raw[2] or any(p & 7 for p in pointers) or
++                max(pointers) - min(pointers) >= size):
++            continue
++        for selector, _effective, upper in selectors:
++            first = max(0, selector - MAX_OBJECT_PREFIX)
++            board = (first & ~0xFFF) | (raw[2] & 0xFFF)
++            if board < first:
++                board += 0x1000
++            while board <= selector:
++                va_base = raw[2] - board
++                if va_base > 0 and not va_base & 0xFFF:
++                    objects = {i: p - va_base for i, p in enumerate(raw) if p}
++                    if (objects.get(2) == board and
++                            all(0 <= o < size for o in objects.values())):
++                        index_members = [m for m in range(MAX_IDENTITY_PREFIX)
++                                         if all(heap[o + m] == i for i, o in objects.items())]
++                        if (len(index_members) == 1 and
++                                all(u16(o + index_members[0]) == i for i, o in objects.items())):
++                            links = []
++                            for ctgp, lower, tuple_upper in tuples:
++                                if tuple_upper != _effective:
++                                    continue
++                                lower_selectors = [s for s, _e, d in selectors
++                                                   if (d == lower or _e == lower) and board <= s < board + MAX_OBJECT_PREFIX]
++                                if len(lower_selectors) == 1:
++                                    links.append((ctgp, lower_selectors[0]))
++                            if len(links) == 1:
++                                ctgp, lower_selector = links[0]
++                                found.append(Resolution(
++                                    va_base, array, board, selector, ctgp,
++                                    index_members[0], -1, -1, -1,
++                                    selector + 4, selector + 16, ctgp + 8,
++                                    upper, u32(ctgp + 8)))
++                                # Python dataclass predates lower_selector; the
++                                # C production result retains it explicitly.
++                board += 0x1000
++    unique = list(dict.fromkeys(found))
++    if len(unique) != 1:
++        raise ResolveError(f"autonomous semantic topology count is {len(unique)}, expected exactly 1")
++    return unique[0]
+diff --git a/research/test_semantic_core.c b/research/test_semantic_core.c
+new file mode 100644
+index 0000000..8d19ffd
+--- /dev/null
++++ b/research/test_semantic_core.c
+@@ -0,0 +1,33 @@
++#include "semantic_core.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++struct image { unsigned char *p; size_t n; };
++static int image_read(void *opaque,uint64_t off,void *dst,uint32_t n){
++    struct image *x=opaque;if(off>x->n||n>x->n-off)return 1;memcpy(dst,x->p+off,n);return 0;
++}
++static unsigned char *load(const char *name,size_t *size){
++    FILE *f=fopen(name,"rb");unsigned char *p;long n;if(!f)return NULL;
++    fseek(f,0,SEEK_END);n=ftell(f);rewind(f);p=malloc((size_t)n);if(!p||fread(p,1,(size_t)n,f)!=(size_t)n){fclose(f);free(p);return NULL;}fclose(f);*size=(size_t)n;return p;
++}
++static uint32_t u32(const unsigned char *p){uint32_t v;memcpy(&v,p,4);return v;}
++int main(int argc,char **argv){
++    unsigned char *a,*b,*pub,*heap;size_t an,bn,pn;uint32_t mask,count=0;struct gs_policy ps[20];
++    struct image image;struct gs_io io;struct gs_resolution r;int st;
++    if(argc!=4){fprintf(stderr,"usage: %s page0 pages1-1024 public-a618\n",argv[0]);return 2;}
++    if(!(a=load(argv[1],&an))||!(b=load(argv[2],&bn))||!(pub=load(argv[3],&pn))||pn<0xcc+20*0x104)return 2;
++    heap=malloc(an+bn);memcpy(heap,a,an);memcpy(heap+an,b,bn);free(a);free(b);mask=u32(pub+4);
++    for(uint32_t i=0;i<20;i++)if(mask&(1U<<i)){
++        const unsigned char *q=pub+0xcc+i*0x104;ps[count]=(struct gs_policy){i,q[4],q[5],q[6],u32(q+12),u32(q+16)};count++;
++    }
++    free(pub);image=(struct image){heap,an+bn};io=(struct gs_io){&image,image_read,an+bn};
++    st=gs_resolve_autonomous(&io,&r);if(st){fprintf(stderr,"autonomous resolve=%d\n",st);return 1;}
++    { struct gs_resolution cross; st=gs_resolve(&io,mask,ps,count,&cross);
++      if(st||cross.va_base!=r.va_base||cross.board_object!=r.board_object||cross.selector!=r.selector||cross.ctgp_tuple!=r.ctgp_tuple){fprintf(stderr,"public cross-check=%d\n",st);return 1;} }
++    printf("va=%llx array=%llx board=%llx selector=%llx ctgp=%llx members=%x/%x/%x/%x writers=%llx/%llx/%llx\n",
++      (unsigned long long)r.va_base,(unsigned long long)r.policy_array,(unsigned long long)r.board_object,
++      (unsigned long long)r.selector,(unsigned long long)r.ctgp_tuple,r.index_member,r.type_member,r.id_member,r.unit_member,
++      (unsigned long long)r.board_max_effective,(unsigned long long)r.board_max_source,(unsigned long long)r.pmgr_upper);
++    free(heap);return 0;
++}
+diff --git a/research/test_semantic_resolver.py b/research/test_semantic_resolver.py
+new file mode 100644
+index 0000000..94a0f09
+--- /dev/null
++++ b/research/test_semantic_resolver.py
+@@ -0,0 +1,69 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import struct
++import unittest
++
++from semantic_resolver import ResolveError, parse_public_fixture, resolve, resolve_autonomous
++
++ROOT = Path('/home/user/Documents/Codex/2026-09-20/z-x20')
++CAPTURE = ROOT / 'outputs/225w-research/gsp-read-probe-v4/live/20afa6a8-ed42-4d5e-ac15-7a54ca42a9eb'
++
++
++def fixture():
++    heap = ((CAPTURE / 'read-00000000-0001.bin').read_bytes() +
++            (CAPTURE / 'read-00001000-0400.bin').read_bytes())
++    mask, policies = parse_public_fixture((CAPTURE / 'public-a618.bin').read_bytes())
++    return bytearray(heap), mask, policies
++
++
++class ResolverTest(unittest.TestCase):
++    def test_live_capture_has_one_layout(self):
++        heap, mask, policies = fixture()
++        r = resolve_autonomous(heap)
++        cross = resolve(heap, mask, policies)
++        self.assertEqual(r.stock_upper_mw, 175_000)
++        self.assertEqual(r.current_upper_mw, 175_000)
++        self.assertNotEqual(r.va_base, 0)
++        self.assertEqual((r.va_base, r.board_object, r.selector, r.ctgp_tuple),
++                         (cross.va_base, cross.board_object, cross.selector, cross.ctgp_tuple))
++
++    def test_relocated_heap_va(self):
++        heap, mask, policies = fixture()
++        old = resolve_autonomous(heap)
++        delta = 0x4000_0000
++        for off in range(0, len(heap) - 7, 8):
++            value = struct.unpack_from('<Q', heap, off)[0]
++            if old.va_base <= value < old.va_base + len(heap):
++                struct.pack_into('<Q', heap, off, value + delta)
++        new = resolve_autonomous(heap)
++        self.assertEqual(new.va_base, old.va_base + delta)
++        self.assertEqual(new.board_object, old.board_object)
++
++    def test_elevated_values_keep_same_topology(self):
++        heap, _mask, _policies = fixture()
++        old = resolve_autonomous(heap)
++        for off in (old.board_max_effective, old.board_max_source, old.pmgr_upper):
++            struct.pack_into('<I', heap, off, 250_000)
++        new = resolve_autonomous(heap)
++        self.assertEqual((new.va_base, new.board_object, new.selector, new.ctgp_tuple),
++                         (old.va_base, old.board_object, old.selector, old.ctgp_tuple))
++        self.assertEqual(new.current_upper_mw, 250_000)
++
++    def test_corrupt_selector_fails_closed(self):
++        heap, mask, policies = fixture()
++        r = resolve_autonomous(heap)
++        heap[r.selector + 12] = 0
++        with self.assertRaises(ResolveError):
++            resolve_autonomous(heap)
++
++    def test_duplicate_selector_fails_closed(self):
++        heap, mask, policies = fixture()
++        r = resolve_autonomous(heap)
++        duplicate = r.selector + 0x40
++        heap[duplicate:duplicate + 20] = heap[r.selector:r.selector + 20]
++        with self.assertRaises(ResolveError):
++            resolve_autonomous(heap)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h b/src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h
+new file mode 100644
+index 0000000..14c4a32
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h
+@@ -0,0 +1,52 @@
++/* SPDX-License-Identifier: MIT
++ * Fixed 615.71.09 PMGR control layout used by the direct-TGP v7 experiment.
++ * Callers still have to bind the live PMGR object and validate GPU identity.
++ */
++#ifndef CODEX_GSP_DIRECT_TGP_LAYOUT_H
++#define CODEX_GSP_DIRECT_TGP_LAYOUT_H
++#define GSP_DIRECT_TGP_GET_CONTROL 0x2080a61aU
++#define GSP_DIRECT_TGP_SET_CONTROL 0x2080e61bU
++#define GSP_DIRECT_TGP_CONTROL_SIZE 0x3634U
++#define GSP_DIRECT_TGP_MASK ((1U << 2) | (1U << 13) | (1U << 14))
++#define GSP_DIRECT_TGP_ENTRY_BASE 0x14U
++#define GSP_DIRECT_TGP_ENTRY_STRIDE 0xc4U
++static NvU8 *gspDirectTgpEntry(NvU8 *control,NvU32 index)
++{
++ return control+GSP_DIRECT_TGP_ENTRY_BASE+index*GSP_DIRECT_TGP_ENTRY_STRIDE;
++}
++static NvU32 gspDirectTgpGetU32(const NvU8 *p)
++{
++ NvU32 v;portMemCopy(&v,sizeof(v),p,sizeof(v));return v;
++}
++static void gspDirectTgpPutU32(NvU8 *p,NvU32 v)
++{
++ portMemCopy(p,4,&v,4);
++}
++static NV_STATUS gspDirectTgpValidateControl(NvU8 *control,NvU32 baseValue,NvU32 entry13Value,NvU32 entry14Value)
++{
++ NvU8 *e2=gspDirectTgpEntry(control,2),*e13=gspDirectTgpEntry(control,13),*e14=gspDirectTgpEntry(control,14);
++ if(gspDirectTgpGetU32(control+0x10)!=GSP_DIRECT_TGP_MASK ||
++    gspDirectTgpGetU32(e2)!=0 || gspDirectTgpGetU32(e2+4)!=baseValue ||
++    gspDirectTgpGetU32(e13)!=0x12 || gspDirectTgpGetU32(e13+4)!=entry13Value ||
++    gspDirectTgpGetU32(e14)!=0x12 || gspDirectTgpGetU32(e14+4)!=entry14Value)
++  return NV_ERR_INVALID_DATA;
++ return NV_OK;
++}
++static NV_STATUS gspDirectTgpValidateSource(NvU8 *control)
++{
++ NvU8 *e2=gspDirectTgpEntry(control,2),*e13=gspDirectTgpEntry(control,13),*e14=gspDirectTgpEntry(control,14);
++ NvU32 v13=gspDirectTgpGetU32(e13+4),v14=gspDirectTgpGetU32(e14+4);
++ if(gspDirectTgpGetU32(control+0x10)!=GSP_DIRECT_TGP_MASK||
++    gspDirectTgpGetU32(e2)!=0||gspDirectTgpGetU32(e2+4)!=0xffffffffU||
++    gspDirectTgpGetU32(e13)!=0x12||gspDirectTgpGetU32(e14)!=0x12||
++    v13<50000U||v13>400000U||v14<10000U||v14>400000U)
++  return NV_ERR_INVALID_DATA;
++ return NV_OK;
++}
++static void gspDirectTgpPrepareTarget(NvU8 *control,NvU32 targetMw)
++{
++ gspDirectTgpPutU32(gspDirectTgpEntry(control,2)+4,targetMw);
++ gspDirectTgpPutU32(gspDirectTgpEntry(control,13)+4,targetMw);
++ gspDirectTgpPutU32(gspDirectTgpEntry(control,14)+4,targetMw-150000U);
++}
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.h b/src/nvidia/interface/deprecated/gsp_power_probe.h
+new file mode 100644
+index 0000000..0e335f2
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_power_probe.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: MIT. Semantic direct-TGP research ABI. */
++#ifndef CODEX_GSP_POWER_PROBE_H
++#define CODEX_GSP_POWER_PROBE_H
++#define GSP_POWER_PROBE_CMD 0x2080ff72U
++#define GSP_POWER_PROBE_VERSION 8U
++#define GSP_POWER_TARGET_MIN_MW 200000U
++#define GSP_POWER_TARGET_MAX_MW 300000U
++typedef struct {
++ NvU32 version,operation,targetMw,reserved;
++ NvU32 stage,result,armed,active,poisoned,writes;
++ NvU32 resolverStatus,resolverCandidates,stockUpperMw,currentUpperMw;
++ NvU64 heapSource,heapSize,vaBase,policyArray,boardObject;
++ NvU64 maxEffectiveMember,maxSourceMember,pmgrUpperMember;
++} GSP_POWER_PROBE_PARAMS;
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.inc b/src/nvidia/interface/deprecated/gsp_power_probe.inc
+new file mode 100644
+index 0000000..fe64a7a
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_power_probe.inc
+@@ -0,0 +1,227 @@
++/* SPDX-License-Identifier: MIT
++ * Semantic, fail-closed GSP power resolver and writer.  Root/API/GPU locks are
++ * held by the dispatcher.  Userspace supplies an operation and target only.
++ */
++#include "deprecated/gsp_semantic_adapter.inc"
++#include "deprecated/gsp_direct_tgp_layout.h"
++
++#define GSP_SEMANTIC_CACHE_SIZE (256U * 1024U)
++#define GSP_SEMANTIC_WPR_PREFIX 0x4000ULL /* Blackwell ACR WPR/LSB header ABI */
++
++typedef struct {
++ OBJGPU *gpu;
++ NvU64 source,size,cacheBase;
++ NvU32 cacheBytes;
++ NvBool cacheValid;
++ MEMORY_DESCRIPTOR *desc;
++ void *map,*priv;
++ NV_STATUS lastStatus;
++} GSP_SEMANTIC_CONTEXT;
++
++typedef struct {
++ NvU32 armed,ceilings,active,poisoned,writes,target;
++ struct gs_resolution resolution;
++} GSP_SEMANTIC_STATE;
++
++static GSP_SEMANTIC_STATE gspSemanticState;
++typedef struct { NvU32 used,active,poisoned; } GSP_DIRECT_TGP_STATE;
++static GSP_DIRECT_TGP_STATE gspDirectTgpState;
++
++static NV_STATUS gspSemanticContextInit(OBJGPU *g,GSP_SEMANTIC_CONTEXT *c)
++{
++ KernelGsp *kgsp=GPU_GET_KERNEL_GSP(g);NV_RANGE wpr[2]={NV_RANGE_EMPTY,NV_RANGE_EMPTY};
++ NvU64 heapSize=0,start,end;NV_STATUS st;
++ if(IS_VIRTUAL(g)||gpuIsCCFeatureEnabled(g)||kgsp==NULL)return NV_ERR_NOT_SUPPORTED;
++ if(kgsp->pWprMetaHopper!=NULL){
++  GspFwWprMeta *m=kgsp->pWprMetaHopper;
++  if(m->magic!=GSP_FW_WPR_META_MAGIC)return NV_ERR_INVALID_DATA;heapSize=m->gspFwHeapSize;
++ }else if(kgsp->pWprMetaV1!=NULL){
++  GspFwWprMetaV1 *m=kgsp->pWprMetaV1;
++  if(m->magic!=GSP_FW_WPR_META_MAGIC)return NV_ERR_INVALID_DATA;heapSize=m->gspFwHeapSize;
++ }else return NV_ERR_NOT_SUPPORTED;
++ kbusCarveoutWprs_HAL(g,GPU_GET_KERNEL_BUS(g),wpr);
++ if(wpr[1].hi<wpr[1].lo||wpr[1].hi==~(NvU64)0)return NV_ERR_INVALID_DATA;
++ start=wpr[1].lo;end=wpr[1].hi+1;
++ if(start>end-GSP_SEMANTIC_WPR_PREFIX)return NV_ERR_INVALID_DATA;
++ c->source=start+GSP_SEMANTIC_WPR_PREFIX;
++ if(heapSize<0x10000ULL||heapSize>GS_HEAP_LIMIT||heapSize>end-c->source)return NV_ERR_INVALID_DATA;
++ c->gpu=g;c->size=heapSize;c->cacheBase=0;c->cacheBytes=0;c->cacheValid=NV_FALSE;c->lastStatus=NV_OK;
++ st=memdescCreate(&c->desc,g,GSP_SEMANTIC_CACHE_SIZE,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
++ if(st!=NV_OK)return st;st=memdescAlloc(c->desc);if(st!=NV_OK){memdescDestroy(c->desc);c->desc=NULL;return st;}
++ st=memdescMapOld(c->desc,0,GSP_SEMANTIC_CACHE_SIZE,NV_TRUE,NV_PROTECT_READ_WRITE,&c->map,&c->priv);
++ if(st!=NV_OK){memdescFree(c->desc);memdescDestroy(c->desc);c->desc=NULL;}
++ return st;
++}
++
++static void gspSemanticContextDestroy(GSP_SEMANTIC_CONTEXT *c)
++{
++ if(c->map!=NULL)memdescUnmapOld(c->desc,NV_TRUE,c->map,c->priv);
++ if(c->desc!=NULL){memdescFree(c->desc);memdescDestroy(c->desc);}
++ c->map=NULL;c->desc=NULL;c->priv=NULL;
++}
++
++static NV_STATUS gspSemanticFill(GSP_SEMANTIC_CONTEXT *c,NvU64 offset)
++{
++ NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS x={0};
++ RM_API *api=GPU_GET_PHYSICAL_RMAPI(c->gpu);NvU64 pa,base=offset&~((NvU64)GSP_SEMANTIC_CACHE_SIZE-1);
++ NvU32 bytes=(NvU32)((c->size-base)>GSP_SEMANTIC_CACHE_SIZE?GSP_SEMANTIC_CACHE_SIZE:(c->size-base));
++ NV_STATUS st;
++ if(gspProbe_poisoned||gspProbe_callsUsed>=GSP_READ_PROBE_MAX_CALLS)return NV_ERR_INVALID_STATE;
++ pa=memdescGetPhysAddr(c->desc,AT_GPU,0);
++ if(!pa||(pa&4095))return NV_ERR_INVALID_DATA;
++ portMemSet(c->map,0,GSP_SEMANTIC_CACHE_SIZE);
++ x.src.baseAddr=c->source+base;x.src.size=bytes;x.src.aperture=2;x.src.cpuCacheAttrib=0;
++ x.dst.baseAddr=pa;x.dst.size=GSP_SEMANTIC_CACHE_SIZE;x.dst.aperture=1;x.dst.cpuCacheAttrib=0;
++ x.transferSize=bytes;x.memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ ++gspProbe_callsUsed;
++ st=api->Control(api,c->gpu->hInternalClient,c->gpu->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&x,sizeof(x));
++ if(st!=NV_OK){
++  gspProbe_poisoned=NV_TRUE;c->lastStatus=st;
++  gspProbe_retainedDesc=c->desc;gspProbe_retainedMap=c->map;gspProbe_retainedPriv=c->priv;
++  c->desc=NULL;c->map=NULL;c->priv=NULL;return st;
++ }
++ c->cacheBase=base;c->cacheBytes=bytes;c->cacheValid=NV_TRUE;return NV_OK;
++}
++
++static NV_STATUS gspSemanticReadNv(GSP_SEMANTIC_CONTEXT *c,NvU64 offset,void *dest,NvU32 size)
++{
++ NvU32 done=0;NV_STATUS st;
++ if(size>c->size||offset>c->size-size)return NV_ERR_INVALID_ARGUMENT;
++ while(done<size){NvU64 at=offset+done;NvU32 within,n;
++  if(!c->cacheValid||at<c->cacheBase||at>=c->cacheBase+c->cacheBytes){st=gspSemanticFill(c,at);if(st!=NV_OK)return st;}
++  within=(NvU32)(at-c->cacheBase);n=c->cacheBytes-within;if(n>size-done)n=size-done;
++  portMemCopy((NvU8*)dest+done,size-done,(NvU8*)c->map+within,n);done+=n;
++ }
++ return NV_OK;
++}
++
++static int gspSemanticCoreRead(void *opaque,NvU64 offset,void *dest,NvU32 size)
++{
++ GSP_SEMANTIC_CONTEXT *c=opaque;c->lastStatus=gspSemanticReadNv(c,offset,dest,size);
++ return c->lastStatus==NV_OK?0:1;
++}
++
++static NV_STATUS gspSemanticResolve(GSP_SEMANTIC_CONTEXT *c,struct gs_resolution *r,NvU32 *resolverStatus)
++{
++ struct gs_io io={c,gspSemanticCoreRead,c->size};int rc=gs_resolve_autonomous(&io,r);
++ *resolverStatus=(NvU32)rc;
++ if(rc==GS_OK)return NV_OK;if(rc==GS_IO&&c->lastStatus!=NV_OK)return c->lastStatus;
++ return rc==GS_AMBIGUOUS?NV_ERR_INVALID_STATE:NV_ERR_INVALID_DATA;
++}
++
++static NV_STATUS gspSemanticReadU32(GSP_SEMANTIC_CONTEXT *c,NvU64 offset,NvU32 *value)
++{ return gspSemanticReadNv(c,offset,value,4); }
++
++static NV_STATUS gspSemanticWriteU32(GSP_SEMANTIC_CONTEXT *c,NvU64 offset,NvU32 expected,NvU32 value)
++{
++ OBJGPU *g=c->gpu;MEMORY_DESCRIPTOR *desc=NULL;void *map=NULL,*priv=NULL;NV_STATUS st;NvU32 actual;
++ NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS x={0};RM_API *api=GPU_GET_PHYSICAL_RMAPI(g);NvU64 pa;
++ if(offset!=gspSemanticState.resolution.board_max_effective&&
++    offset!=gspSemanticState.resolution.board_max_source&&offset!=gspSemanticState.resolution.pmgr_upper)
++  return NV_ERR_INVALID_ARGUMENT;
++ st=gspSemanticReadU32(c,offset,&actual);if(st!=NV_OK)return st;if(actual!=expected)return NV_ERR_INVALID_STATE;
++ st=memdescCreate(&desc,g,4096,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);if(st!=NV_OK)return st;
++ st=memdescAlloc(desc);if(st!=NV_OK)goto cleanup;
++ st=memdescMapOld(desc,0,4096,NV_TRUE,NV_PROTECT_READ_WRITE,&map,&priv);if(st!=NV_OK)goto cleanup;
++ portMemSet(map,0,4096);portMemCopy(map,4096,&value,4);pa=memdescGetPhysAddr(desc,AT_GPU,0);
++ if(!pa||(pa&4095)){st=NV_ERR_INVALID_DATA;goto cleanup;}
++ x.src.baseAddr=pa;x.src.size=4096;x.src.aperture=1;x.src.cpuCacheAttrib=0;
++ x.dst.baseAddr=c->source+(offset&~4095ULL);x.dst.size=4096;x.dst.offset=offset&4095;
++ x.dst.aperture=2;x.dst.cpuCacheAttrib=0;x.transferSize=4;x.memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ ++gspProbe_callsUsed;++gspSemanticState.writes;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&x,sizeof(x));
++ if(st!=NV_OK){
++  gspProbe_poisoned=NV_TRUE;gspSemanticState.poisoned=1;
++  gspProbe_retainedDesc=desc;gspProbe_retainedMap=map;gspProbe_retainedPriv=priv;
++  desc=NULL;map=NULL;priv=NULL;goto cleanup;
++ }
++ c->cacheValid=NV_FALSE;st=gspSemanticReadU32(c,offset,&actual);
++ if(st!=NV_OK||actual!=value){if(st==NV_OK)st=NV_ERR_INVALID_STATE;gspSemanticState.poisoned=1;}
++cleanup:
++ if(map!=NULL)memdescUnmapOld(desc,NV_TRUE,map,priv);if(desc!=NULL){memdescFree(desc);memdescDestroy(desc);}return st;
++}
++
++static NvBool gspSemanticSame(const struct gs_resolution *a,const struct gs_resolution *b)
++{
++ return a->va_base==b->va_base&&a->policy_array==b->policy_array&&a->board_object==b->board_object&&
++  a->selector==b->selector&&a->ctgp_tuple==b->ctgp_tuple&&
++  a->board_max_effective==b->board_max_effective&&a->board_max_source==b->board_max_source&&
++  a->pmgr_upper==b->pmgr_upper;
++}
++
++static NV_STATUS gspSemanticDirectSet(GSP_SEMANTIC_CONTEXT *c,NvU32 target,GSP_POWER_PROBE_PARAMS *p)
++{
++ OBJGPU *g=c->gpu;RM_API *api=GPU_GET_PHYSICAL_RMAPI(g);NvU8 *control=NULL;NV_STATUS st;
++ if(gspDirectTgpState.used||gspDirectTgpState.poisoned||!gspSemanticState.ceilings)return NV_ERR_INVALID_STATE;
++ control=portMemAllocNonPaged(GSP_DIRECT_TGP_CONTROL_SIZE);if(control==NULL)return NV_ERR_NO_MEMORY;
++ portMemSet(control,0,GSP_DIRECT_TGP_CONTROL_SIZE);gspDirectTgpPutU32(control+0x10,GSP_DIRECT_TGP_MASK);
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,GSP_DIRECT_TGP_GET_CONTROL,control,GSP_DIRECT_TGP_CONTROL_SIZE);
++ if(st!=NV_OK)goto done;st=gspDirectTgpValidateSource(control);if(st!=NV_OK)goto done;
++ p->stage=31;st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
++  NV2080_CTRL_CMD_INTERNAL_PMGR_UNSET_DYNAMIC_BOOST_LIMIT,NULL,0);
++ if(st==NV_ERR_INVALID_DATA)st=NV_OK;if(st!=NV_OK)goto uncertain;
++ gspDirectTgpPrepareTarget(control,target);gspDirectTgpState.used=1;p->stage=32;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,GSP_DIRECT_TGP_SET_CONTROL,control,GSP_DIRECT_TGP_CONTROL_SIZE);
++ if(st!=NV_OK)goto uncertain;
++ portMemSet(control,0,GSP_DIRECT_TGP_CONTROL_SIZE);gspDirectTgpPutU32(control+0x10,GSP_DIRECT_TGP_MASK);p->stage=33;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,GSP_DIRECT_TGP_GET_CONTROL,control,GSP_DIRECT_TGP_CONTROL_SIZE);
++ if(st!=NV_OK)goto uncertain;
++ st=gspDirectTgpValidateControl(control,target,target,target-150000U);if(st!=NV_OK)goto uncertain;
++ gspDirectTgpState.active=1;gspSemanticState.active=1;p->stage=100;goto done;
++uncertain:
++ gspDirectTgpState.poisoned=1;gspSemanticState.poisoned=1;gspProbe_poisoned=NV_TRUE;
++done:
++ if(control!=NULL)portMemFree(control);return st;
++}
++
++static void gspSemanticOutput(GSP_POWER_PROBE_PARAMS *p,GSP_SEMANTIC_CONTEXT *c,const struct gs_resolution *r)
++{
++ p->armed=gspSemanticState.armed;p->active=gspSemanticState.active;p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;
++ p->writes=gspSemanticState.writes;p->heapSource=c->source;p->heapSize=c->size;
++ p->vaBase=r->va_base;p->policyArray=r->policy_array;p->boardObject=r->board_object;
++ p->maxEffectiveMember=r->board_max_effective;p->maxSourceMember=r->board_max_source;p->pmgrUpperMember=r->pmgr_upper;
++ p->stockUpperMw=r->stock_upper_mw;p->currentUpperMw=r->current_upper_mw;
++}
++
++static NV_STATUS gspPowerProbe(OBJGPU *g,GSP_POWER_PROBE_PARAMS *p,NvU32 size)
++{
++ GSP_SEMANTIC_CONTEXT c={0};struct gs_resolution r={0},after={0};NV_STATUS st;NvU32 a,b,d,operation,target;
++ if(size!=sizeof(*p)||p->version!=GSP_POWER_PROBE_VERSION||p->reserved||
++    (p->operation!=0&&p->operation!=1&&p->operation!=2&&p->operation!=6)||
++    p->targetMw<GSP_POWER_TARGET_MIN_MW||p->targetMw>GSP_POWER_TARGET_MAX_MW||p->targetMw<150000U)
++  return NV_ERR_INVALID_ARGUMENT;
++ operation=p->operation;target=p->targetMw;portMemSet((NvU8*)p+16,0,sizeof(*p)-16);p->stage=1;
++ if(gspSemanticState.poisoned||gspProbe_poisoned){st=NV_ERR_INVALID_STATE;goto output_no_context;}
++ st=gspSemanticContextInit(g,&c);if(st!=NV_OK)goto output_no_context;
++ p->stage=10;st=gspSemanticResolve(&c,&r,&p->resolverStatus);if(st!=NV_OK)goto output;
++ gspSemanticOutput(p,&c,&r);
++ if(operation==0){p->stage=100;goto output;}
++ if((gspSemanticState.armed||gspSemanticState.ceilings||gspSemanticState.active)&&
++    (!gspSemanticSame(&gspSemanticState.resolution,&r)||gspSemanticState.target!=target)){st=NV_ERR_INVALID_STATE;goto output;}
++ st=gspSemanticReadU32(&c,r.board_max_effective,&a);if(st==NV_OK)st=gspSemanticReadU32(&c,r.board_max_source,&b);
++ if(st==NV_OK)st=gspSemanticReadU32(&c,r.pmgr_upper,&d);if(st!=NV_OK)goto output;
++ if(operation==1){
++  if(gspSemanticState.armed||a!=r.stock_upper_mw||b!=r.stock_upper_mw||d!=r.stock_upper_mw){st=NV_ERR_INVALID_STATE;goto output;}
++  gspSemanticState.armed=1;gspSemanticState.target=target;gspSemanticState.resolution=r;p->stage=100;goto output;
++ }
++ if(operation==2){
++  if(!gspSemanticState.armed||gspSemanticState.ceilings||a!=r.stock_upper_mw||b!=r.stock_upper_mw||d!=r.stock_upper_mw){st=NV_ERR_INVALID_STATE;goto output;}
++  p->stage=21;st=gspSemanticWriteU32(&c,r.board_max_source,r.stock_upper_mw,target);
++  if(st==NV_OK){p->stage=22;st=gspSemanticWriteU32(&c,r.board_max_effective,r.stock_upper_mw,target);}
++  if(st==NV_OK){p->stage=23;st=gspSemanticWriteU32(&c,r.pmgr_upper,r.stock_upper_mw,target);}
++  if(st!=NV_OK){gspSemanticState.poisoned=1;goto output;}
++  c.cacheValid=NV_FALSE;p->stage=24;st=gspSemanticResolve(&c,&after,&p->resolverStatus);
++  if(st!=NV_OK||!gspSemanticSame(&r,&after)||after.current_upper_mw!=target){if(st==NV_OK)st=NV_ERR_INVALID_STATE;gspSemanticState.poisoned=1;goto output;}
++  gspSemanticState.ceilings=1;gspSemanticState.resolution=after;r=after;p->stage=100;goto output;
++ }
++ if(!gspSemanticState.ceilings||gspSemanticState.active||a!=target||b!=target||d!=target){st=NV_ERR_INVALID_STATE;goto output;}
++ p->stage=30;st=gspSemanticDirectSet(&c,target,p);
++output:
++ gspSemanticOutput(p,&c,&r);gspSemanticContextDestroy(&c);
++output_no_context:
++ p->result=st;p->armed=gspSemanticState.armed;p->active=gspSemanticState.active;
++ p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;p->writes=gspSemanticState.writes;
++ return NV_OK;
++}
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.h b/src/nvidia/interface/deprecated/gsp_read_probe.h
+new file mode 100644
+index 0000000..a1a609e
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: MIT. Fixed observed heap, read-only experimental ABI. */
++#ifndef CODEX_GSP_READ_PROBE_H
++#define CODEX_GSP_READ_PROBE_H
++#define GSP_READ_PROBE_CMD 0x2080ff71U
++#define GSP_READ_PROBE_VERSION 4U
++#define GSP_READ_PROBE_WPR_START 0x3ef020000ULL
++#define GSP_READ_PROBE_WPR_END   0x3f9c60000ULL
++#define GSP_READ_PROBE_SOURCE    0x3ef024000ULL
++#define GSP_READ_PROBE_HEAP_SIZE 0x73dc000ULL
++#define GSP_READ_PROBE_PAGE_SIZE 4096U
++#define GSP_READ_PROBE_MAX_CALLS 32768U
++typedef struct {
++ NvU32 version, operation, reserved[2];
++ NvU64 pageOffset; /* Input: relative, page-aligned, inside this fixed heap only. */
++ NvU32 stage, rpcStatus, bytesRead, retainedBuffer, callsUsed, reservedOut;
++ NvU64 wprStart, wprEnd, image, imageSize, heap, heapSize, source;
++ NvU8 data[GSP_READ_PROBE_PAGE_SIZE];
++} GSP_READ_PROBE_PARAMS;
++static int gspReadProbeBuild(NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS *p,
++ NvU32 pci, NvU32 sub, NvU64 start, NvU64 end, NvU64 offset, NvU64 dest) {
++ if (pci != 0x2c1910deU || sub != 0x60411d05U ||
++     start != GSP_READ_PROBE_WPR_START || end != GSP_READ_PROBE_WPR_END ||
++     (offset & 4095) || offset > GSP_READ_PROBE_HEAP_SIZE-4096 ||
++     !dest || (dest & 4095) || dest > (~(NvU64)0)-4095) return 0;
++ *p = (NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS){0};
++ p->src.baseAddr=GSP_READ_PROBE_SOURCE+offset; p->src.size=4096;
++ p->src.aperture=2; p->src.cpuCacheAttrib=0;
++ p->dst.baseAddr=dest; p->dst.size=4096; p->dst.aperture=1; p->dst.cpuCacheAttrib=0;
++ p->transferSize=4096; p->memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ return 1;
++}
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.inc b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+new file mode 100644
+index 0000000..c327223
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+@@ -0,0 +1,117 @@
++static NvBool gspProbe_reserveRestore, gspProbe_internalRead;
++static OBJGPU *gspProbe_owner;
++    static NvBool gspProbe_poisoned = NV_FALSE;
++    static NvU32 gspProbe_callsUsed;
++    /* Keep an uncertain DMA destination alive after any failed RPC. One allocation
++     * maximum; recovery is reboot, not hot unloading this experimental module. */
++    static MEMORY_DESCRIPTOR *gspProbe_retainedDesc;
++    static void *gspProbe_retainedMap, *gspProbe_retainedPriv;
++
++/* SPDX-License-Identifier: MIT
++ * Experimental, explicitly triggered, 4096-byte RM heap page read. GPU group lock held.
++ * The caller cannot provide an address, a size, or bytes to write to GPU memory.
++ */
++static NV_STATUS gspReadProbe(OBJGPU *pGpu, GSP_READ_PROBE_PARAMS *out, NvU32 size)
++{
++    KernelGsp *kgsp = GPU_GET_KERNEL_GSP(pGpu);
++    MEMORY_DESCRIPTOR *desc = NULL;
++    void *map = NULL, *priv = NULL;
++    NvU32 operation;
++    NvU64 start, end, image, imageSize, heap, heapSize, offset;
++    NV_STATUS status;
++    NV_RANGE wprRegions[2] = {NV_RANGE_EMPTY, NV_RANGE_EMPTY};
++    RM_API *api = GPU_GET_PHYSICAL_RMAPI(pGpu);
++    NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS transfer;
++
++    if (size != sizeof(*out) || out->version != GSP_READ_PROBE_VERSION ||
++        out->operation > 1 || out->reserved[0] || out->reserved[1] ||
++        (out->operation == 0 && out->pageOffset != 0))
++        return NV_ERR_INVALID_ARGUMENT;
++    if (IS_VIRTUAL(pGpu) || gpuIsCCFeatureEnabled(pGpu) || kgsp == NULL ||
++        pGpu->idInfo.PCIDeviceID != 0x2c1910deU ||
++        pGpu->idInfo.PCISubDeviceID != 0x60411d05U)
++        return NV_ERR_NOT_SUPPORTED;
++
++    if (kgsp->pWprMetaHopper != NULL)
++    {
++        GspFwWprMeta *m = kgsp->pWprMetaHopper;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else if (kgsp->pWprMetaV1 != NULL)
++    {
++        GspFwWprMetaV1 *m = kgsp->pWprMetaV1;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else return NV_ERR_NOT_SUPPORTED;
++
++    /* Hopper+ boot input does not receive ACR-computed offsets back. Read the
++     * actual WPR registers through NVIDIA's architecture-specific read helper.
++     * No guessed image/heap address and no hardware register write. */
++    kbusCarveoutWprs_HAL(pGpu, GPU_GET_KERNEL_BUS(pGpu), wprRegions);
++    if (wprRegions[1].hi < wprRegions[1].lo || wprRegions[1].hi == ~(NvU64)0)
++        return NV_ERR_INVALID_DATA;
++    start=wprRegions[1].lo; end=wprRegions[1].hi+1;
++    /* This probe is deliberately fixed to the observed layout. The first
++     * 16 KiB of WPR2 are NOT in the RM FB mapper's allowed regions. */
++    if (start != GSP_READ_PROBE_WPR_START || end != GSP_READ_PROBE_WPR_END ||
++        imageSize != 0x19be000ULL || heapSize != 0x8a00000ULL)
++        return NV_ERR_INVALID_DATA;
++
++    if (gspProbe_owner != NULL && gspProbe_owner != pGpu) return NV_ERR_NOT_SUPPORTED;
++    gspProbe_owner=pGpu;
++    operation=out->operation; offset=out->pageOffset;
++    portMemSet(out,0,sizeof(*out));
++    out->version=GSP_READ_PROBE_VERSION; out->operation=operation;
++    out->wprStart=start; out->wprEnd=end; out->image=image;
++    out->imageSize=imageSize; out->heap=heap; out->heapSize=heapSize;
++    out->pageOffset=offset; out->callsUsed=gspProbe_callsUsed;
++    out->retainedBuffer=gspProbe_poisoned;
++    /* Validate firmware metadata before any allocation or GSP command. */
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,offset,4096))
++        return NV_ERR_INVALID_DATA;
++    out->source=GSP_READ_PROBE_SOURCE+offset;
++    out->stage=1;
++    if (operation == 0) return NV_OK;
++    if (gspProbe_poisoned || gspProbe_callsUsed >= GSP_READ_PROBE_MAX_CALLS ||
++        (gspProbe_reserveRestore && !gspProbe_internalRead && gspProbe_callsUsed >= GSP_READ_PROBE_MAX_CALLS-256))
++        return NV_ERR_INVALID_STATE;
++
++    status=memdescCreate(&desc,pGpu,4096,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
++    if (status != NV_OK) return status;
++    status=memdescAlloc(desc);
++    if (status != NV_OK) goto cleanup;
++    status=memdescMapOld(desc,0,4096,NV_TRUE,NV_PROTECT_READ_WRITE,&map,&priv);
++    if (status != NV_OK) goto cleanup;
++    portMemSet(map,0,4096);
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,offset,memdescGetPhysAddr(desc,AT_GPU,0)))
++    { status=NV_ERR_INVALID_DATA; goto cleanup; }
++    out->callsUsed=++gspProbe_callsUsed;
++    out->stage=2;
++    status=api->Control(api,pGpu->hInternalClient,pGpu->hInternalSubdevice,
++        NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&transfer,sizeof(transfer));
++    out->rpcStatus=status;
++    if (status != NV_OK)
++    {
++        gspProbe_poisoned=NV_TRUE;
++        gspProbe_retainedDesc=desc; gspProbe_retainedMap=map; gspProbe_retainedPriv=priv;
++        out->retainedBuffer=1;
++        NV_PRINTF(LEVEL_ERROR,"GSP read probe RPC failed: 0x%x; destination retained until reboot\n",status);
++        /* Static ownership references retained intentionally. */
++        (void)gspProbe_retainedDesc; (void)gspProbe_retainedMap; (void)gspProbe_retainedPriv;
++        return NV_OK; /* Deliver the actual RPC status in the output. */
++    }
++    portMemCopy(out->data,sizeof(out->data),map,4096);
++    out->bytesRead=4096; out->stage=3;
++cleanup:
++    if (map != NULL) memdescUnmapOld(desc,NV_TRUE,map,priv);
++    memdescFree(desc); memdescDestroy(desc);
++    return status;
++}
+diff --git a/src/nvidia/interface/deprecated/gsp_semantic_adapter.inc b/src/nvidia/interface/deprecated/gsp_semantic_adapter.inc
+new file mode 100644
+index 0000000..157c452
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_semantic_adapter.inc
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: MIT
++ * Compile the portable semantic resolver inside RM with NVIDIA's base types.
++ * The resolver owns no memory and its input callback is read-only.
++ */
++#define GS_EXTERNAL_TYPES 1
++#define uint8_t NvU8
++#define uint16_t NvU16
++#define uint32_t NvU32
++#define uint64_t NvU64
++#include "../../../../research/semantic_core.c"
++#undef uint64_t
++#undef uint32_t
++#undef uint16_t
++#undef uint8_t
++#undef GS_EXTERNAL_TYPES
+diff --git a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+index 91e69d5..4b5d18b 100644
+--- a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
++++ b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+@@ -30,6 +30,15 @@
+ 
+ #include "g_finn_rm_api.h"
+ #include "core/thread_state.h"
++#include "gpu/gsp/kernel_gsp.h"
++#include "gpu/bus/kern_bus.h"
++#include "gpu/mem_mgr/mem_mgr.h"
++#include "os/nv_memory_type.h"
++#include "ctrl/ctrl2080/ctrl2080internal.h"
++#include "gsp_read_probe.h"
++#include "gsp_read_probe.inc"
++#include "gsp_power_probe.h"
++#include "gsp_power_probe.inc"
+ 
+ /*!
+  * Some clients are still making these legacy GSS controls. We no longer support these in RM,
+@@ -132,6 +141,18 @@ NV_STATUS RmGssLegacyRpcCmd
+     if (status != NV_OK)
+         goto done;
+ 
++    if (pArgs->cmd == GSP_POWER_PROBE_CMD)
++    {
++        status = gspPowerProbe(pGpu, pKernelParams, pArgs->paramsSize);
++        goto done;
++    }
++
++    if (pArgs->cmd == GSP_READ_PROBE_CMD)
++    {
++        status = gspReadProbe(pGpu, pKernelParams, pArgs->paramsSize);
++        goto done;
++    }
++
+     if (IS_VIRTUAL(pGpu))
+     {
+         NV_RM_RPC_API_CONTROL(pGpu,
+diff --git a/tests_direct_tgp_layout.c b/tests_direct_tgp_layout.c
+new file mode 100644
+index 0000000..d4edb45
+--- /dev/null
++++ b/tests_direct_tgp_layout.c
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: MIT */
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++typedef uint8_t NvU8;typedef uint32_t NvU32;typedef int NV_STATUS;
++#define NV_OK 0
++#define NV_ERR_INVALID_DATA 1
++#define portMemCopy(d,ds,s,ss) memcpy((d),(s),(ss))
++#include "src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h"
++int main(int argc,char **argv)
++{
++ FILE *f;NvU8 *b;long n;
++ assert(argc==2);f=fopen(argv[1],"rb");assert(f);assert(!fseek(f,0,SEEK_END));n=ftell(f);
++ assert(n==GSP_DIRECT_TGP_CONTROL_SIZE);rewind(f);b=calloc(1,(size_t)n);assert(b);
++ assert(fread(b,1,(size_t)n,f)==(size_t)n);fclose(f);
++ assert(gspDirectTgpValidateControl(b,0xffffffffU,210000U,60000U)==NV_OK);
++ gspDirectTgpPrepareTarget(b);
++ assert(gspDirectTgpValidateControl(b,250000U,250000U,100000U)==NV_OK);
++ assert(gspDirectTgpGetU32(b+0x10)==GSP_DIRECT_TGP_MASK);
++ free(b);puts("direct TGP layout fixture: PASS");return 0;
++}

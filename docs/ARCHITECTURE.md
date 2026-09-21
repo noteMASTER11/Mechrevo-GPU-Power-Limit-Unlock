@@ -11,11 +11,11 @@ profile without accepting addresses or target values from user space.
 | Level | Capability | Status |
 |---|---|---|
 | L0 | Discover the Blackwell WPR2 boundaries from HUBMMU BAR0 registers | Live verified |
-| L1 | Resolve the known GPU/PMGR/PowerChannel topology from a relocatable heap snapshot | Offline verified |
+| L1 | Resolve the board-power topology from a heap snapshot without configured addresses or member offsets | Offline verified on the captured heap and synthetic fixtures |
 | L2 | Read protected heap pages through an NVIDIA-owned internal RM/GSP context | Live verified in the v5/v6 in-tree patch |
 | L3 | Read the same pages from a standalone companion module through exported RM operations | Rejected by RM (`NV_ERR_NOT_SUPPORTED`) |
-| L4 | Run the resolver through the in-tree owner adapter and return one read-only snapshot | In progress |
-| L5 | Build and apply the complete reviewed writer contract after every initialization | Not implemented |
+| L4 | Run the autonomous resolver through the in-tree owner adapter | Compiled and installed in the isolated v8 entry; live boot validation pending |
+| L5 | Re-resolve, update three ceilings, disable Dynamic Boost, and submit fixed base TGP | Compiled and installed in the isolated v8 entry; live boot validation pending |
 
 L0 and L1 solve different problems. WPR2 LO and HI are lower and upper
 protected-memory boundaries. They are not wattage fields and do not reveal the
@@ -25,16 +25,16 @@ location of power-policy objects.
 
 ### Portable core
 
-`core/resolver.c` receives a bounded reader and a versioned relative-layout
-schema. It reconstructs the heap virtual-address base from self pointers,
-checks the GPU to PMGR ownership chain, checks the policy array/group aliases,
-and accepts exactly one PowerChannel candidate. It has no PCI IDs, absolute
-GPU addresses, kernel APIs, or write primitive.
+`core/semantic_resolver.c` receives a bounded reader and the current heap size.
+Its production entry point receives no live addresses, member offsets, PCI IDs,
+stock wattage, or driver-version profile. It discovers selector records and a
+cTGP tuple by their values and relationships, discovers a 20-slot policy array
+by shape, infers the heap VA base from its pointers, and finds the unique common
+index member across active policy objects. It accepts exactly one coherent
+board-policy topology.
 
-The current profile still contains relative member locations learned from GSP
-615.71. It removes absolute object addresses but does not yet make the resolver
-independent of future GSP object layouts. A future profile must be added from
-semantic evidence and tested as a separate schema.
+`core/resolver.c` is retained as the earlier profile-based reference. It is no
+longer the v8 production algorithm.
 
 ### Owner adapter
 
@@ -43,11 +43,12 @@ kernel RM client created through the exported `nvidia_get_rm_ops` bridge reaches
 the command dispatcher with `bInternal == false` and is rejected with
 `NV_ERR_NOT_SUPPORTED`. Root privilege does not change that property.
 
-The working transport therefore has to execute inside the NVIDIA open module,
+The working transport executes inside the NVIDIA open module,
 where the GPU's existing `hInternalClient` and `hInternalSubdevice` are owned.
-The v5/v6 patch proved that transport. The next adapter will expose only a
-fixed resolver/apply operation; it must not export arbitrary FB addresses,
-sizes, commands, or data writes.
+The v5/v6 patch proved that transport. The v8 adapter exposes only inspect,
+arm, fixed-ceiling update, and fixed direct-TGP operations. User space supplies
+an operation and a reviewed target in the 200--300 W guard range; it cannot
+supply a protected-memory address, object offset, or arbitrary GSP command.
 
 ### Boot integration
 
@@ -63,14 +64,17 @@ an indeterminate GSP transfer.
 
 ## Writer scope
 
-The Linux v5 result changed three validated ceiling fields to 225,000 mW. The
-developer reference describes a wider 19-field production contract: seven
-core fields, six Type07 Entry13 fields, and six Type07 Entry14 fields. The
-Entry13/Entry14 fields may account for NVVDD/MSVDD policy behavior under load,
-but that relationship has not yet been proved on Linux and those fields are not
-written by this branch.
+The protected-memory writer changes only the three ceiling members returned by
+the current semantic resolution. The final direct-TGP step uses NVIDIA's PMGR
+GET/SET control ABI to update policy entries 2, 13, and 14 as a coherent
+control buffer, rather than locating and writing the corresponding private
+members individually.
 
-The final writer must satisfy all of these conditions:
+The developer reference describes a wider 19-field runtime structure contract.
+That layout remains useful for explaining the NVVDD/MSVDD hypothesis, but v8
+does not assume that those 19 private members retain fixed offsets.
+
+The v8 writer implements these conditions:
 
 1. Resolve exactly one coherent layout during the current owner epoch.
 2. Match every protected stock/default witness for the selected profile.
@@ -80,8 +84,15 @@ The final writer must satisfy all of these conditions:
    immediately afterward.
 6. Stop the epoch after any mismatch, transport error, or ambiguous state.
 
-User space may request a named operation and read results. It may not provide a
-GPU address, object offset, target value, or arbitrary GSP command.
+It re-runs the resolver before every operation and once more after updating the
+three ceilings. Only the three addresses returned by the current resolution
+may reach the four-byte write primitive. Failed DMA or failed readback poisons
+the boot epoch.
+
+User space may request a named operation, a target inside the driver's reviewed
+guard range, and read results. It may not provide a GPU address, object offset,
+writer destination, or arbitrary GSP command. The boot service fixes the target
+at 250,000 mW.
 
 ## Meaning of the 203–207 W observation
 
@@ -97,10 +108,14 @@ before the 19-field writer is enabled.
 
 ## Compatibility claim
 
-The BAR0 WPR2 probe is independent of the installed NVIDIA driver version for
-Blackwell devices that use the GB100 HUBMMU register layout. The RM/GSP owner
-adapter must be built with the matching NVIDIA open-module source and is an
-internal-ABI integration. The power-object resolver is independent of absolute
-addresses and the laptop model, but remains bound to explicitly reviewed object
-schemas. These boundaries are intentional and should not be described as
-universal driver-version support.
+The WPR2 boundary discovery is independent of the captured power-object
+addresses for Blackwell devices using the GB100 HUBMMU layout. The autonomous
+power-object resolver is independent of absolute addresses, private member
+offsets, laptop model, and the earlier `615.71` layout profile.
+
+The RM/GSP owner adapter must still be built with matching NVIDIA open-module
+source and remains an internal-ABI integration. It currently assumes the
+Blackwell WPR/ACR heap starts `0x4000` bytes into WPR2 and uses the current PMGR
+GET/SET control layout. These remaining boundaries must be detected or
+versioned before claiming universal support across driver releases or future
+GPU architectures.

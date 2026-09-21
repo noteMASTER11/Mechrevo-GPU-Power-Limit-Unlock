@@ -1,5 +1,29 @@
 # Portable source and tools
 
+## Semantic v8 experiment
+
+- `core/semantic_resolver.c` and `include/semantic_core.h`: portable,
+  address-free resolver used by the v8 in-tree adapter.
+- `tests/test_semantic_resolver.c`: synthetic relocation, elevated-state,
+  ambiguity, and corruption checks.
+- `patches/nvidia-gsp-semantic-tgp-v8.patch`: complete patch from the pinned
+  NVIDIA 615.71.09 source to the current owner adapter and resolver.
+- `scripts/build_semantic_v8.py`: applies the exact patch to a clean pinned
+  tree and builds without installing or loading anything.
+- `src/runtime/query_semantic_power.c`: preload client whose request contains
+  only operation and target; it sends no protected-memory address or offset.
+- `src/runtime/run_semantic_boot.py`: boot helper that verifies UCC Max TGP,
+  runs the semantic transaction, checks NVML readback, and reports progress on
+  the console.
+- `src/runtime/mechrevo-semantic-tgp.service` and
+  `src/runtime/nvidia-powerd-semantic-tgp.conf`: isolated boot service and
+  Dynamic Boost ownership condition. UCC remains enabled.
+
+See [Semantic TGP v8 validation](SEMANTIC-V8.md) for the current validation
+boundary.
+
+## Verified v6 tools
+
 | Path | Purpose |
 | --- | --- |
 | `patches/nvidia-gsp-persistent-v6.patch` | Complete NVIDIA driver delta against `61dcc93722ecb418bb5f2e00923f05b4b8051dd1`, including probe headers/implementation. |

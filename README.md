@@ -4,7 +4,30 @@
 
 This project documents how to access the GPU's GSP-managed power policies from Linux, inspect their limits, raise the validated board-power ceilings, and submit a new operating-power request through NVIDIA's own firmware handlers. It uses NVIDIA's open kernel module with the original GSP firmware. No hardware shunt modification or EEPROM flashing is involved.
 
-**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The current implementation is deliberately tied to one verified hardware/firmware layout; it is not a universal RTX 50-series unlock.
+**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The verified v6 path remains tied to one hardware/firmware layout. The experimental v8 path adds an address-free semantic resolver and is awaiting its first live boot validation.
+
+## Experimental semantic resolver (v8)
+
+The v8 resolver receives only a bounded reader for the current GSP heap. It no
+longer accepts a heap virtual address, GPU/PMGR/PowerChannel addresses, member
+offsets, a stock wattage, or a driver-version layout profile from user space.
+It finds a unique topology from policy-array shape, common object identity,
+board-selector semantics, and the cTGP lower/upper tuple. Ambiguous or damaged
+snapshots fail closed.
+
+The same portable C core is compiled both by the offline tests and by the
+in-tree NVIDIA owner adapter. The adapter re-resolves before mutation and after
+the three ceiling writes; each write uses compare-before-write and immediate
+readback. The prepared boot transaction sets a fixed 250 W base policy and
+removes the Dynamic Boost source. UCC stays active and must be placed in **Max
+TGP** mode so it yields GPU TGP ownership while retaining platform-profile,
+fan, and water-cooler control.
+
+This removes dependency on the previously captured live addresses and private
+object member offsets. It does not yet remove every compatibility boundary:
+the patch is still compiled into matching NVIDIA open-module source, uses the
+Blackwell WPR/ACR heap prefix, and calls the current internal PMGR control ABI.
+See [the v8 validation guide](docs/SEMANTIC-V8.md) and [architecture](docs/ARCHITECTURE.md).
 
 ## Read in this order
 
@@ -12,8 +35,9 @@ This project documents how to access the GPU's GSP-managed power policies from L
 2. [Installation and operation](docs/INSTALL.md): inspect stock limits, build the software, disable competing TGP controllers, prepare a separate boot entry, activate and verify.
 3. [Tool reference](docs/TOOLS.md): source components, commands and tests.
 4. [Unified resolver architecture](docs/ARCHITECTURE.md): separation of WPR discovery, protected-memory transport, semantic resolution and writer authorization.
-5. [Wiki](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/wiki): GPU access, GSP policies, the exact mechanism, research history, porting and recovery.
-6. [Evidence](evidence/README.md): what the first successful run demonstrated and what was not measured.
+5. [Semantic v8 validation](docs/SEMANTIC-V8.md): the address-free resolver, isolated boot transaction and remaining compatibility boundaries.
+6. [Wiki](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/wiki): GPU access, GSP policies, the exact mechanism, research history, porting and recovery.
+7. [Evidence](evidence/README.md): what the first successful run demonstrated and what was not measured.
 
 ## What changed
 
@@ -46,7 +70,7 @@ The first recorded FurMark run used OpenGL at 7680×4320 for 38.559 seconds and 
 
 ## Repository layout
 
-- `scripts/`, `src/`, `patches/`, `tests/`: maintained build/deployment software, runtime helpers, driver changes and checks. See [Tools](docs/TOOLS.md).
+- `scripts/`, `src/`, `patches/`, `tests/`: maintained build/deployment software, runtime helpers, driver changes and checks. `nvidia-gsp-semantic-tgp-v8.patch` contains the current semantic-resolver experiment. See [Tools](docs/TOOLS.md).
 - `docs/`: sequential instructions and compatibility notes.
 - `docs/wiki/`: version-controlled sources mirrored to the GitHub Wiki.
 - `evidence/`: sanitized successful-run records.
