@@ -68,6 +68,7 @@ def main() -> None:
     command = [
         "/usr/bin/furmark", "--demo", "furmark-gl",
         "--width", "3840", "--height", "2160", "--msaa", "2",
+        "--benchmark", "--duration-ms", str(args.seconds * 1000),
         "--vsync", "0", "--max-time", str(args.seconds),
         "--no-score-box",
     ]
