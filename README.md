@@ -11,8 +11,9 @@ This project documents how to access the GPU's GSP-managed power policies from L
 1. [Compatibility and prerequisites](docs/COMPATIBILITY.md): identify the GPU, driver and kernel; understand what is tested.
 2. [Installation and operation](docs/INSTALL.md): inspect stock limits, build the software, disable competing TGP controllers, prepare a separate boot entry, activate and verify.
 3. [Tool reference](docs/TOOLS.md): source components, commands and tests.
-4. [Wiki](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/wiki): GPU access, GSP policies, the exact mechanism, research history, porting and recovery.
-5. [Evidence](evidence/README.md): what the first successful run demonstrated and what was not measured.
+4. [Unified resolver architecture](docs/ARCHITECTURE.md): separation of WPR discovery, protected-memory transport, semantic resolution and writer authorization.
+5. [Wiki](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/wiki): GPU access, GSP policies, the exact mechanism, research history, porting and recovery.
+6. [Evidence](evidence/README.md): what the first successful run demonstrated and what was not measured.
 
 ## What changed
 

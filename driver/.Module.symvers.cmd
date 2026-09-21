@@ -1,0 +1,1 @@
+savedcmd_Module.symvers :=  /usr/lib/modules/7.2.6-1-cachyos/build/scripts/mod/modpost -M    -a    -N  -o Module.symvers -n -T modules.order -i /usr/lib/modules/7.2.6-1-cachyos/build/Module.symvers -e -i /home/user/Documents/Codex/2026-09-20/z-x20/work/nvidia-gsp-read-probe/kernel-open/Module.symvers
