@@ -1,13 +1,13 @@
 diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
-index df5a5e0..5ff2117 100644
+index df5a5e0..1c3d221 100644
 --- a/kernel-open/nvidia/nv.c
 +++ b/kernel-open/nvidia/nv.c
 @@ -119,6 +119,9 @@
  MODULE_LICENSE("Dual MIT/GPL");
  
  MODULE_INFO(supported, "external");
-+MODULE_INFO(gsp_read_probe, "semantic-tgp-v8-20260922");
-+static char *gsp_read_probe_build = "semantic-tgp-v8-20260922";
++MODULE_INFO(gsp_read_probe, "semantic-tgp-v8r2-20260922");
++static char *gsp_read_probe_build = "semantic-tgp-v8r2-20260922";
 +module_param_named(GspReadProbeBuild, gsp_read_probe_build, charp, 0444);
  MODULE_VERSION(NV_VERSION_STRING);
  MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
@@ -65,7 +65,7 @@ index 0000000..a0519b7
 +path is described as verified.
 diff --git a/research/query_power.c b/research/query_power.c
 new file mode 100644
-index 0000000..7c07232
+index 0000000..0e8ee1d
 --- /dev/null
 +++ b/research/query_power.c
 @@ -0,0 +1,68 @@
@@ -118,7 +118,7 @@ index 0000000..7c07232
 +}
 +#ifndef PROBE_TEST
 +static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
-+ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8-20260922\n");if(f)fclose(f);return ok;}
++ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r2-20260922\n");if(f)fclose(f);return ok;}
 +int ioctl(int fd,unsigned long req,...){
 + static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
 + va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;
@@ -907,10 +907,10 @@ index 0000000..0e335f2
 +#endif
 diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.inc b/src/nvidia/interface/deprecated/gsp_power_probe.inc
 new file mode 100644
-index 0000000..fe64a7a
+index 0000000..0259de3
 --- /dev/null
 +++ b/src/nvidia/interface/deprecated/gsp_power_probe.inc
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,236 @@
 +/* SPDX-License-Identifier: MIT
 + * Semantic, fail-closed GSP power resolver and writer.  Root/API/GPU locks are
 + * held by the dispatcher.  Userspace supplies an operation and target only.
@@ -918,13 +918,15 @@ index 0000000..fe64a7a
 +#include "deprecated/gsp_semantic_adapter.inc"
 +#include "deprecated/gsp_direct_tgp_layout.h"
 +
-+#define GSP_SEMANTIC_CACHE_SIZE (256U * 1024U)
++#define GSP_SEMANTIC_CACHE_SIZE (64U * 1024U)
++#define GSP_SEMANTIC_MIN_TRANSFER 4096U
++#define GSP_SEMANTIC_MAX_CALLS 524288U
 +#define GSP_SEMANTIC_WPR_PREFIX 0x4000ULL /* Blackwell ACR WPR/LSB header ABI */
 +
 +typedef struct {
 + OBJGPU *gpu;
 + NvU64 source,size,cacheBase;
-+ NvU32 cacheBytes;
++ NvU32 cacheBytes,chunkSize;
 + NvBool cacheValid;
 + MEMORY_DESCRIPTOR *desc;
 + void *map,*priv;
@@ -958,7 +960,8 @@ index 0000000..fe64a7a
 + if(start>end-GSP_SEMANTIC_WPR_PREFIX)return NV_ERR_INVALID_DATA;
 + c->source=start+GSP_SEMANTIC_WPR_PREFIX;
 + if(heapSize<0x10000ULL||heapSize>GS_HEAP_LIMIT||heapSize>end-c->source)return NV_ERR_INVALID_DATA;
-+ c->gpu=g;c->size=heapSize;c->cacheBase=0;c->cacheBytes=0;c->cacheValid=NV_FALSE;c->lastStatus=NV_OK;
++ c->gpu=g;c->size=heapSize;c->cacheBase=0;c->cacheBytes=0;c->chunkSize=GSP_SEMANTIC_CACHE_SIZE;
++ c->cacheValid=NV_FALSE;c->lastStatus=NV_OK;
 + st=memdescCreate(&c->desc,g,GSP_SEMANTIC_CACHE_SIZE,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
 + if(st!=NV_OK)return st;st=memdescAlloc(c->desc);if(st!=NV_OK){memdescDestroy(c->desc);c->desc=NULL;return st;}
 + st=memdescMapOld(c->desc,0,GSP_SEMANTIC_CACHE_SIZE,NV_TRUE,NV_PROTECT_READ_WRITE,&c->map,&c->priv);
@@ -976,19 +979,25 @@ index 0000000..fe64a7a
 +static NV_STATUS gspSemanticFill(GSP_SEMANTIC_CONTEXT *c,NvU64 offset)
 +{
 + NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS x={0};
-+ RM_API *api=GPU_GET_PHYSICAL_RMAPI(c->gpu);NvU64 pa,base=offset&~((NvU64)GSP_SEMANTIC_CACHE_SIZE-1);
-+ NvU32 bytes=(NvU32)((c->size-base)>GSP_SEMANTIC_CACHE_SIZE?GSP_SEMANTIC_CACHE_SIZE:(c->size-base));
-+ NV_STATUS st;
-+ if(gspProbe_poisoned||gspProbe_callsUsed>=GSP_READ_PROBE_MAX_CALLS)return NV_ERR_INVALID_STATE;
++ RM_API *api=GPU_GET_PHYSICAL_RMAPI(c->gpu);NvU64 pa,base;NvU32 bytes;NV_STATUS st;
++ if(gspProbe_poisoned||gspProbe_callsUsed>=GSP_SEMANTIC_MAX_CALLS)return NV_ERR_INVALID_STATE;
 + pa=memdescGetPhysAddr(c->desc,AT_GPU,0);
 + if(!pa||(pa&4095))return NV_ERR_INVALID_DATA;
-+ portMemSet(c->map,0,GSP_SEMANTIC_CACHE_SIZE);
-+ x.src.baseAddr=c->source+base;x.src.size=bytes;x.src.aperture=2;x.src.cpuCacheAttrib=0;
-+ x.dst.baseAddr=pa;x.dst.size=GSP_SEMANTIC_CACHE_SIZE;x.dst.aperture=1;x.dst.cpuCacheAttrib=0;
-+ x.transferSize=bytes;x.memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
-+ ++gspProbe_callsUsed;
-+ st=api->Control(api,c->gpu->hInternalClient,c->gpu->hInternalSubdevice,
-+                 NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&x,sizeof(x));
++ for(;;){
++  base=offset&~((NvU64)c->chunkSize-1);
++  bytes=(NvU32)((c->size-base)>c->chunkSize?c->chunkSize:(c->size-base));
++  portMemSet(c->map,0,GSP_SEMANTIC_CACHE_SIZE);portMemSet(&x,0,sizeof(x));
++  x.src.baseAddr=c->source+base;x.src.size=bytes;x.src.aperture=2;x.src.cpuCacheAttrib=0;
++  x.dst.baseAddr=pa;x.dst.size=bytes;x.dst.aperture=1;x.dst.cpuCacheAttrib=0;
++  x.transferSize=bytes;x.memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++  ++gspProbe_callsUsed;
++  st=api->Control(api,c->gpu->hInternalClient,c->gpu->hInternalSubdevice,
++                  NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&x,sizeof(x));
++  /* An invalid-argument result is a definite pre-DMA rejection. Negotiate a
++   * smaller power-of-two transfer without retaining an uncertain buffer. */
++  if(st==NV_ERR_INVALID_ARGUMENT&&c->chunkSize>GSP_SEMANTIC_MIN_TRANSFER){c->chunkSize>>=1;continue;}
++  break;
++ }
 + if(st!=NV_OK){
 +  gspProbe_poisoned=NV_TRUE;c->lastStatus=st;
 +  gspProbe_retainedDesc=c->desc;gspProbe_retainedMap=c->map;gspProbe_retainedPriv=c->priv;

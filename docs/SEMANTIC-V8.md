@@ -6,6 +6,14 @@ an experiment prepared for the verified MECHREVO RTX 5080 Laptop host. The
 existing v6 instructions remain the established path until this entry completes
 a clean live boot and load test.
 
+The first v8 live boot reached WPR2 successfully but the initial 256 KiB heap
+DMA was rejected with `NV_ERR_INVALID_ARGUMENT` before any write. Revision
+v8r2 negotiates the supported power-of-two transfer size from 64 KiB down to
+the already verified 4 KiB transport. Only an explicit invalid-argument result
+permits a smaller retry; every uncertain transfer error still poisons the boot
+epoch. The first attempt performed zero writes and left the stock 175 W maximum
+intact.
+
 ## What v8 resolves
 
 At every operation the in-tree NVIDIA owner adapter reads the current protected

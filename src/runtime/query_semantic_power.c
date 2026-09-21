@@ -47,7 +47,7 @@ static int run_power(int (*next)(int,unsigned long,...),int fd,unsigned long req
 }
 #ifndef PROBE_TEST
 static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
- int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8-20260922\n");if(f)fclose(f);return ok;}
+ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r2-20260922\n");if(f)fclose(f);return ok;}
 int ioctl(int fd,unsigned long req,...){
  static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
  va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;

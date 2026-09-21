@@ -5,7 +5,7 @@ import datetime,hashlib,json,os,subprocess,time
 
 ROOT=Path(__file__).resolve().parent
 TOKEN='codex.semantic_tgp=250'
-MARKER='semantic-tgp-v8-20260922'
+MARKER='semantic-tgp-v8r2-20260922'
 TARGET=250000
 GREEN='\033[1;32m';RESET='\033[0m'
 
@@ -54,6 +54,7 @@ def main():
  env=dict(os.environ,LD_PRELOAD=str(ROOT/'query_power.so'),CODEX_GSP_POWER_MODE='activate',CODEX_GSP_TARGET_MW=str(TARGET))
  proc=subprocess.run(['nvidia-smi','-q','-d','POWER'],env=env,capture_output=True,text=True)
  (out/'activation.log').write_text(proc.stderr);(out/'nvidia-smi-power.txt').write_text(proc.stdout)
+ if proc.stderr.strip():line(proc.stderr.strip())
  rows=records(proc.stderr);state['resolver_records']=rows
  if proc.returncode or 'GSP_SEMANTIC SUCCESS mode=activate target=250000' not in proc.stderr.splitlines():
   raise RuntimeError('semantic transaction did not report success')
@@ -78,5 +79,12 @@ def main():
 if __name__=='__main__':
  try:main()
  except BaseException as exc:
+  try:
+   boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+   record=Path('/var/lib/mechrevo-semantic-tgp')/boot/'activation.json'
+   if record.exists():
+    failed=json.loads(record.read_text());failed['status']='failed';failed['error']=str(exc)
+    record.write_text(json.dumps(failed,indent=2)+'\n')
+  except BaseException:pass
   line(f'\033[1;31m[FAILED]\033[0m {exc}')
   raise
