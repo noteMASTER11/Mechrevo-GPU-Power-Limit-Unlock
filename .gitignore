@@ -2,6 +2,11 @@ __pycache__/
 *.pyc
 *.so
 *.ko*
+*.o
+*.cmd
+*.mod
+Module.symvers
+modules.order
 *.bin
 *.rom
 *.elf
