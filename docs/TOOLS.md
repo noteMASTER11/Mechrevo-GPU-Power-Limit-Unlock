@@ -12,12 +12,16 @@
   tree and builds without installing or loading anything.
 - `src/runtime/query_semantic_power.c`: ioctl adapter whose request contains
   only operation and target; it sends no protected-memory address or offset.
+- `src/runtime/base_tgp_wire.h` and `tests/test_base_tgp_wire.c`: distinct GET
+  and SET serializers, including a byte-for-byte regression test for the
+  buffer captured from NVIDIA's own NVML packer.
 - `src/runtime/semantic_boot.c`: standalone C boot runner. It verifies UCC Max
   TGP, loads NVML, runs the semantic transaction through the linked ioctl
   adapter, checks readback, and reports progress on the console. It does not
   require Python, a virtual environment, or a separate preload library.
-- `src/runtime/mechrevo-semantic-tgp.service`: isolated read-only boot service.
-  It does not stop `nvidia-powerd`, UCC, or another platform controller.
+- `src/runtime/mechrevo-semantic-tgp.service` and
+  `src/runtime/nvidia-powerd-semantic-tgp.conf`: isolated v8r6 activation and
+  Dynamic Boost ownership condition. UCC remains enabled in Max TGP mode.
 
 See [Semantic TGP v8 validation](SEMANTIC-V8.md) for the current validation
 boundary.

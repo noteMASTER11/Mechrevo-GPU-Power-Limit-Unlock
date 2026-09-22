@@ -2,9 +2,9 @@
 
 v8 is the first boot path whose production resolver receives no configured GSP
 heap address, object address, member offset, or stock wattage. It is currently
-an experiment prepared for the verified MECHREVO RTX 5080 Laptop host. Its
-automatic writer is disabled. The existing v6 instructions remain the
-established path.
+an experiment prepared for the verified MECHREVO RTX 5080 Laptop host. The
+existing v6 instructions remain the established path; v8r6 is a live-validation
+candidate.
 
 The first two v8 live boots reached WPR2 but their 256 KiB and 64 KiB memory
 descriptors were rejected with `NV_ERR_INVALID_ARGUMENT` before any write. A
@@ -27,9 +27,16 @@ succeeded. A clean-boot, policy-2-only SET immediately returned
 later the GNOME Shell channel timed out and the compositor crashed. The failure
 happened without a GPU workload, so it does not demonstrate a physical
 over-current event. It demonstrates that the inferred SET ABI is invalid or
-incomplete on this driver. The automatic v8 writer remains disabled until the
-SET contract is recovered and independently checked. See the
+incomplete on this driver. See the
 [incident record](../evidence/2026-09-22-v8r5-pmu-halt.md).
+
+The hidden NVML policy packer was then invoked in a separate diagnostic process
+with an ioctl interposer that captured and suppressed `0x2080e61b`. Its output
+proved that GET and SET do not share a header: SET writes `0x000000ff` at
+`+0x0c`, leaves `+0x10` zero, and places the policy-2 type/value at the usual
+`0xc4` entry stride. The reconstructed v8r6 buffer matched all 13,876 captured
+bytes. v8r6 keeps the one-shot rule and requires a successful GET readback
+before reporting activation.
 
 ## What v8 resolves
 
@@ -50,10 +57,10 @@ provided by the user-space runner or stored as driver-library offsets.
 
 ## Boot transaction
 
-The installed recovery entry is now named:
+The new live-validation entry is named:
 
 ```text
-CachyOS - NVIDIA Semantic Resolver (inspection only)
+CachyOS - NVIDIA Semantic TGP 250W v8r6
 ```
 
 This entry removes `quiet` and `splash`, disables Plymouth, and enables systemd
@@ -69,11 +76,11 @@ Before selecting it:
    system profile, fans, and water-cooler controls;
 4. keep the ordinary CachyOS entry available.
 
-The v8 activation service is disabled, and the entry uses
-`codex.semantic_tgp=inspect`, which does not satisfy the old activation unit's
-condition. Do not re-enable the v8r5 base-policy SET. The compiled resolver and
-captured failure evidence remain available for development, but the next live
-entry must be read-only until the exact SET request contract is known.
+The v8r6 entry and service use the unique token
+`codex.semantic_tgp=250-v8r6`. The service runs the C resolver, verifies the
+three ceiling writes, performs one correctly serialized policy-2 SET, and reads
+the policy table back. It never retries SET in the same boot. The v8r5 helper
+and activation service remain disabled.
 
 After boot, collect the result with:
 
@@ -83,7 +90,8 @@ journalctl -b -u mechrevo-semantic-tgp.service --no-pager
 nvidia-smi --query-gpu=name,power.limit,enforced.power.limit,power.max_limit,power.draw,temperature.gpu --format=csv
 ```
 
-Do not use this entry for a load test or power-limit activation.
+Do not start a load test unless the service reports success and both NVML
+CURRENT and maximum read back at 250,000 mW.
 
 ## Offline validation
 

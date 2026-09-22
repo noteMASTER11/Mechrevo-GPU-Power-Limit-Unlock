@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -10,13 +11,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <systemd/sd-bus.h>
 #include <time.h>
 #include <unistd.h>
 #include "nvtypes.h"
 #include "deprecated/gsp_power_probe.h"
 
-#define TOKEN "codex.semantic_tgp=inspect"
-#define MARKER "semantic-tgp-v8r4-20260922"
+#define TOKEN "codex.semantic_tgp=250-v8r6"
+#define MARKER "semantic-tgp-v8r6-20260922"
 #define TARGET_MW 250000U
 #define GREEN "\033[1;32m"
 #define RED "\033[1;31m"
@@ -64,12 +66,56 @@ static int token_present(const char *text,const char *token)
     return 0;
 }
 
+static int ac_online(void)
+{
+    DIR *d=opendir("/sys/class/power_supply");struct dirent *e;char path[512],type[64],online[16];int found=0;
+    if(!d)return 0;
+    while((e=readdir(d))){if(e->d_name[0]=='.')continue;
+        snprintf(path,sizeof(path),"/sys/class/power_supply/%s/type",e->d_name);if(read_text(path,type,sizeof(type)))continue;
+        if(strcmp(type,"Mains")&&strcmp(type,"USB")&&strcmp(type,"USB_PD"))continue;
+        snprintf(path,sizeof(path),"/sys/class/power_supply/%s/online",e->d_name);
+        if(!read_text(path,online,sizeof(online))&&!strcmp(online,"1")){found=1;break;}}
+    closedir(d);return found;
+}
+
+static int process_running(const char *name)
+{
+    DIR *d=opendir("/proc");struct dirent *e;char path[512],comm[128];int found=0;
+    if(!d)return 0;
+    while((e=readdir(d))){if(!isdigit((unsigned char)e->d_name[0]))continue;
+        snprintf(path,sizeof(path),"/proc/%s/comm",e->d_name);if(!read_text(path,comm,sizeof(comm))&&!strcmp(comm,name)){found=1;break;}}
+    closedir(d);return found;
+}
+
+static int ucc_status(char *json,size_t size)
+{
+    sd_bus *bus=NULL;sd_bus_message *reply=NULL;sd_bus_error error=SD_BUS_ERROR_NULL;const char *value=NULL;int r;
+    r=sd_bus_open_system(&bus);if(r<0)goto done;
+    r=sd_bus_call_method(bus,"com.uniwill.uccd","/com/uniwill/uccd","com.uniwill.uccd",
+                         "GetGPUPowerStatusJSON",&error,&reply,NULL);if(r<0)goto done;
+    r=sd_bus_message_read(reply,"s",&value);if(r<0||!value){r=-1;goto done;}
+    if(strlen(value)>=size){r=-1;goto done;}strcpy(json,value);
+    r=strstr(json,"\"enabled\":true")&&strstr(json,"\"requestedW\":null")?0:-1;
+done:
+    sd_bus_error_free(&error);sd_bus_message_unref(reply);sd_bus_unref(bus);return r;
+}
+
 static int wait_for_marker(char *marker,size_t size)
 {
     unsigned waited;
     for(waited=0;waited<120;waited++){
         if(!read_text("/sys/module/nvidia/parameters/GspReadProbeBuild",marker,size))
             return strcmp(marker,MARKER)?-1:0;
+        sleep(1);
+    }
+    return -1;
+}
+
+static int wait_for_ucc(char *json,size_t size)
+{
+    unsigned waited;
+    for(waited=0;waited<60;waited++){
+        if(!ucc_status(json,size))return 0;
         sleep(1);
     }
     return -1;
@@ -128,17 +174,20 @@ int main(void)
     sigset_t set;
     if(geteuid()!=0){line("[FAILED]","root required");return 1;}
     if(read_text("/proc/cmdline",cmdline,sizeof(cmdline))||!token_present(cmdline,TOKEN)){line("[FAILED]","dedicated boot token absent");return 1;}
-    line("[....]","Waiting for the NVIDIA module for a read-only semantic inspection");
+    line("[....]","Waiting for the NVIDIA module and UCC Max TGP ownership state");
     if(wait_for_marker(marker,sizeof(marker))){line("[FAILED]","wrong or unavailable NVIDIA module marker");return 1;}
-    strcpy(ucc,"null");
-    line("[SUCCESS]","NVIDIA module marker matches; no writer will be armed");
+    if(!ac_online()){line("[FAILED]","AC power required");return 1;}
+    if(process_running("nvidia-powerd")){line("[FAILED]","nvidia-powerd still owns Dynamic Boost");return 1;}
+    if(wait_for_ucc(ucc,sizeof(ucc))){line("[FAILED]","UCC Max TGP is not yielding GPU ownership");return 1;}
+    line("[SUCCESS]","UCC Max TGP is active; platform and cooling control remain available");
     if(make_record(ucc)){line("[FAILED]","cannot create one-attempt journal");return 1;}
     sigemptyset(&set);sigaddset(&set,SIGINT);sigaddset(&set,SIGTERM);sigaddset(&set,SIGHUP);sigprocmask(SIG_BLOCK,&set,NULL);
     line("[....]","Resolving the live GSP policy arena with the verified 4 KiB transport");
-    setenv("CODEX_GSP_POWER_MODE","inspect",1);setenv("CODEX_GSP_TARGET_MW","250000",1);
+    setenv("CODEX_GSP_POWER_MODE","activate",1);setenv("CODEX_GSP_TARGET_MW","250000",1);
     if(run_nvml(&current,&maximum,name,sizeof(name))){finish_record("failed","semantic transaction failed",current,maximum);line("[FAILED]","semantic transaction failed");return 1;}
-    if(semantic_transaction_last()->armed||semantic_transaction_last()->active||semantic_transaction_last()->writes){finish_record("failed","read-only state mismatch",current,maximum);line("[FAILED]","read-only state mismatch");return 1;}
-    snprintf(message,sizeof(message),"%s semantic topology resolved; stock ceiling is %u W",name,semantic_transaction_last()->stockUpperMw/1000);line("[SUCCESS]",message);
-    finish_record("inspection_complete",NULL,current,maximum);line("[SUCCESS]","Read-only inspection completed; zero writes were issued");
+    if(current!=TARGET_MW||maximum!=TARGET_MW){finish_record("failed","NVML readback mismatch",current,maximum);line("[FAILED]","NVML readback mismatch");return 1;}
+    if(!semantic_transaction_last()->armed||semantic_transaction_last()->active||semantic_transaction_last()->writes!=3){finish_record("failed","driver state mismatch",current,maximum);line("[FAILED]","driver state mismatch");return 1;}
+    snprintf(message,sizeof(message),"%s exposes a verified %u W limit",name,current/1000);line("[SUCCESS]",message);
+    finish_record("verified_250w",NULL,current,maximum);line("[SUCCESS]","Semantic ceilings and the base TGP policy are verified; Dynamic Boost remains disabled");
     line("[....]","Holding the success screen for 5 seconds");sleep(5);return 0;
 }

@@ -4,7 +4,7 @@
 
 This project documents how to access the GPU's GSP-managed power policies from Linux, inspect their limits, raise the validated board-power ceilings, and submit a new operating-power request through NVIDIA's own firmware handlers. It uses NVIDIA's open kernel module with the original GSP firmware. No hardware shunt modification or EEPROM flashing is involved.
 
-**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The verified v6 path remains tied to one hardware/firmware layout. The experimental v8 resolver has now been validated for read-only discovery and ceiling resolution, but its automatic writer is disabled after the v8r5 base-policy SET halted the GPU PMU.
+**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The verified v6 path remains tied to one hardware/firmware layout. The experimental v8 resolver has been validated for address-free discovery and ceiling resolution. v8r6 corrects the base-policy SET wire format found defective in v8r5 and is prepared for live validation.
 
 ## Experimental semantic resolver (v8)
 
@@ -21,8 +21,10 @@ relocate the policy topology and identify the three ceiling writers without
 stored addresses. The later v8r5 attempt showed that a successful policy GET
 does not establish that the corresponding SET buffer is valid. Its
 policy-2-only SET returned `NV_ERR_RESET_REQUIRED`, halted the PMU and caused
-the graphical session to lose the GPU. That SET path has been reverted and the
-installed v8 boot entry is inspection-only while its ABI is investigated.
+the graphical session to lose the GPU. Offline capture of NVIDIA's own hidden
+packer then established that SET uses `0x000000ff` at header offset `+0x0c`
+and no GET mask at `+0x10`. v8r6 reproduces the captured 13,876-byte SET buffer
+byte-for-byte and is installed as a separate, not-yet-validated boot entry.
 
 This removes dependency on the previously captured live addresses and private
 object member offsets. It does not yet remove every compatibility boundary:

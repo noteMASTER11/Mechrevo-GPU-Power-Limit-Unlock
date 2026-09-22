@@ -1,0 +1,23 @@
+{
+  "driver": "615.71.09",
+  "control": "0x2080e61b",
+  "size_bytes": 13876,
+  "capture_mode": "NVML hidden packer executed with the control ioctl suppressed in user space",
+  "test_target_mw": 100000,
+  "sha256": "cfeac5b91cfb9a16751924997f5183c0203e0a5d1a0aa5b2181c6eae52d19583",
+  "nonzero_fields": [
+    {
+      "offset": "0x000c",
+      "u32_le": 255,
+      "meaning": "SET header"
+    },
+    {
+      "offset": "0x01a0",
+      "u32_le": 100000,
+      "meaning": "policy 2 target in milliwatts"
+    }
+  ],
+  "get_mask_offset_0x10": 0,
+  "gpu_control_forwarded": false,
+  "comparison": "v8r6 serializer matched all 13876 captured bytes"
+}
