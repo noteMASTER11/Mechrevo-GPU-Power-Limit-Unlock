@@ -4,7 +4,7 @@
 
 This project documents how to access the GPU's GSP-managed power policies from Linux, inspect their limits, raise the validated board-power ceilings, and submit a new operating-power request through NVIDIA's own firmware handlers. It uses NVIDIA's open kernel module with the original GSP firmware. No hardware shunt modification or EEPROM flashing is involved.
 
-**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The verified v6 path remains tied to one hardware/firmware layout. The experimental v8 path adds an address-free semantic resolver and is awaiting its first live boot validation.
+**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The verified v6 path remains tied to one hardware/firmware layout. The experimental v8 resolver has now been validated for read-only discovery and ceiling resolution, but its automatic writer is disabled after the v8r5 base-policy SET halted the GPU PMU.
 
 ## Experimental semantic resolver (v8)
 
@@ -16,20 +16,19 @@ board-selector semantics, and the cTGP lower/upper tuple. Ambiguous or damaged
 snapshots fail closed.
 
 The same portable C core is compiled both by the offline tests and by the
-in-tree NVIDIA owner adapter. The adapter re-resolves before mutation and after
-the three ceiling writes; each write uses compare-before-write and immediate
-readback. A standalone C boot runner loads NVML and drives the transaction
-without Python, a virtual environment, or a separate preload library. The
-prepared boot transaction sets a fixed 250 W base policy and removes the
-Dynamic Boost source. UCC stays active and must be placed in **Max TGP** mode so
-it yields GPU TGP ownership while retaining platform-profile, fan, and
-water-cooler control.
+in-tree NVIDIA owner adapter. Live v8r4 evidence confirms that the resolver can
+relocate the policy topology and identify the three ceiling writers without
+stored addresses. The later v8r5 attempt showed that a successful policy GET
+does not establish that the corresponding SET buffer is valid. Its
+policy-2-only SET returned `NV_ERR_RESET_REQUIRED`, halted the PMU and caused
+the graphical session to lose the GPU. That SET path has been reverted and the
+installed v8 boot entry is inspection-only while its ABI is investigated.
 
 This removes dependency on the previously captured live addresses and private
 object member offsets. It does not yet remove every compatibility boundary:
 the patch is still compiled into matching NVIDIA open-module source, uses the
 Blackwell WPR/ACR heap prefix, and calls the current internal PMGR control ABI.
-See [the v8 validation guide](docs/SEMANTIC-V8.md) and [architecture](docs/ARCHITECTURE.md).
+See [the v8 validation guide](docs/SEMANTIC-V8.md), [failure record](evidence/2026-09-22-v8r5-pmu-halt.md), and [architecture](docs/ARCHITECTURE.md).
 
 ## Read in this order
 

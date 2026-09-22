@@ -69,7 +69,7 @@ def main():
         "-I" + str(source / "src/nvidia/interface"),
         str(ROOT / "src/runtime/query_semantic_power.c"),
         str(ROOT / "src/runtime/semantic_boot.c"),
-        "-ldl", "-lsystemd", "-o", str(out / "mechrevo-semantic-tgp"))
+        "-ldl", "-o", str(out / "mechrevo-semantic-tgp"))
     marker = subprocess.check_output(
         ["modinfo", "-F", "gsp_read_probe", str(source / "kernel-open/nvidia.ko")], text=True
     ).strip()

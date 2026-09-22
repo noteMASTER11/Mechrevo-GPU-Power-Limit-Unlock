@@ -16,9 +16,8 @@
   TGP, loads NVML, runs the semantic transaction through the linked ioctl
   adapter, checks readback, and reports progress on the console. It does not
   require Python, a virtual environment, or a separate preload library.
-- `src/runtime/mechrevo-semantic-tgp.service` and
-  `src/runtime/nvidia-powerd-semantic-tgp.conf`: isolated boot service and
-  Dynamic Boost ownership condition. UCC remains enabled.
+- `src/runtime/mechrevo-semantic-tgp.service`: isolated read-only boot service.
+  It does not stop `nvidia-powerd`, UCC, or another platform controller.
 
 See [Semantic TGP v8 validation](SEMANTIC-V8.md) for the current validation
 boundary.

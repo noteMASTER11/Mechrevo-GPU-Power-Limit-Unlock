@@ -14,8 +14,9 @@ profile without accepting addresses or target values from user space.
 | L1 | Resolve the board-power topology from a heap snapshot without configured addresses or member offsets | Offline verified on the captured heap and synthetic fixtures |
 | L2 | Read protected heap pages through an NVIDIA-owned internal RM/GSP context | Live verified in the v5/v6 in-tree patch |
 | L3 | Read the same pages from a standalone companion module through exported RM operations | Rejected by RM (`NV_ERR_NOT_SUPPORTED`) |
-| L4 | Run the autonomous resolver through the in-tree owner adapter | Compiled and installed in the isolated v8 entry; live boot validation pending |
-| L5 | Re-resolve, update three ceilings, disable Dynamic Boost, and submit fixed base TGP | Compiled and installed in the isolated v8 entry; live boot validation pending |
+| L4 | Run the autonomous resolver through the in-tree owner adapter | Live verified by v8r4; the exact manually known topology was recovered without supplied addresses |
+| L5 | Re-resolve and update the three ceiling members | Live verified by v8r4 with immediate readback at 250,000 mW |
+| L6 | Submit a fixed base-TGP policy through the public PMGR control ABI | Blocked: v8r5 policy-2 SET halted the PMU and required a reboot |
 
 L0 and L1 solve different problems. WPR2 LO and HI are lower and upper
 protected-memory boundaries. They are not wattage fields and do not reveal the
@@ -65,10 +66,11 @@ an indeterminate GSP transfer.
 ## Writer scope
 
 The protected-memory writer changes only the three ceiling members returned by
-the current semantic resolution. The final direct-TGP step uses NVIDIA's PMGR
-GET/SET control ABI to update policy entries 2, 13, and 14 as a coherent
-control buffer, rather than locating and writing the corresponding private
-members individually.
+the current semantic resolution. The attempted final direct-TGP step used
+NVIDIA's PMGR GET/SET control IDs. GET exposed entries 2, 13, and 14, but
+treating that GET response layout as a valid SET request was disproved by
+v8r5. A policy-2-only SET halted the PMU. No automatic SET is authorized until
+the actual request layout and required preconditions are recovered.
 
 The developer reference describes a wider 19-field runtime structure contract.
 That layout remains useful for explaining the NVVDD/MSVDD hypothesis, but v8

@@ -2,9 +2,9 @@
 
 v8 is the first boot path whose production resolver receives no configured GSP
 heap address, object address, member offset, or stock wattage. It is currently
-an experiment prepared for the verified MECHREVO RTX 5080 Laptop host. The
-existing v6 instructions remain the established path until this entry completes
-a clean live boot and load test.
+an experiment prepared for the verified MECHREVO RTX 5080 Laptop host. Its
+automatic writer is disabled. The existing v6 instructions remain the
+established path.
 
 The first two v8 live boots reached WPR2 but their 256 KiB and 64 KiB memory
 descriptors were rejected with `NV_ERR_INVALID_ARGUMENT` before any write. A
@@ -15,8 +15,21 @@ cache repeatedly fetched pages while rejecting false candidates and exhausted
 its 32,768-call budget. It stopped without poisoning the transport or writing
 anything. Revision v8r4 reads the bounded 8 MiB object arena sequentially into
 one temporary snapshot, then performs the same address-free semantic search in
-memory. Every transfer error still poisons the boot epoch. All failed attempts
-performed zero writes and left the stock 175 W maximum intact.
+memory. Live v8r4 then resolved the exact topology previously found manually:
+heap source `0x3ef024000`, heap VA base `0x7f2000000`, policy array `0x3823a8`,
+board selector `0x3bc610`, and writers `0x3bc718`, `0x3bc724`, and `0x3843ac`.
+It verified three ceiling writes to 250,000 mW. Its internal-client base-policy
+GET was rejected with `NV_ERR_NOT_SUPPORTED`.
+
+v8r5 moved the base-policy request to the external RM client, where GET
+succeeded. A clean-boot, policy-2-only SET immediately returned
+`NV_ERR_RESET_REQUIRED`; the GSP reported that the PMU had halted. Eight seconds
+later the GNOME Shell channel timed out and the compositor crashed. The failure
+happened without a GPU workload, so it does not demonstrate a physical
+over-current event. It demonstrates that the inferred SET ABI is invalid or
+incomplete on this driver. The automatic v8 writer remains disabled until the
+SET contract is recovered and independently checked. See the
+[incident record](../evidence/2026-09-22-v8r5-pmu-halt.md).
 
 ## What v8 resolves
 
@@ -37,10 +50,10 @@ provided by the user-space runner or stored as driver-library offsets.
 
 ## Boot transaction
 
-The isolated entry is named:
+The installed recovery entry is now named:
 
 ```text
-CachyOS - NVIDIA Semantic TGP 250W v8
+CachyOS - NVIDIA Semantic Resolver (inspection only)
 ```
 
 This entry removes `quiet` and `splash`, disables Plymouth, and enables systemd
@@ -56,16 +69,11 @@ Before selecting it:
    system profile, fans, and water-cooler controls;
 4. keep the ordinary CachyOS entry available.
 
-The boot service runs one compiled C executable. It waits for GSP-RM and UCC,
-verifies that `nvidia-powerd` has yielded Dynamic Boost ownership, loads NVML,
-and runs operations `inspect`, `arm`, `ceilings`, and `direct set` through its
-in-process ioctl adapter. It requires no Python installation, virtual
-environment, `LD_PRELOAD`, or separate shared object. Console output includes
-green `[SUCCESS]` records for the unique resolution, verified ceiling writes,
-and the final 250 W NVML limit. A verified success remains on screen for five
-seconds. Any ambiguity, unexpected pre-state, transfer error, readback
-mismatch, active competing TGP request, or wrong module marker stops the
-transaction.
+The v8 activation service is disabled, and the entry uses
+`codex.semantic_tgp=inspect`, which does not satisfy the old activation unit's
+condition. Do not re-enable the v8r5 base-policy SET. The compiled resolver and
+captured failure evidence remain available for development, but the next live
+entry must be read-only until the exact SET request contract is known.
 
 After boot, collect the result with:
 
@@ -75,8 +83,7 @@ journalctl -b -u mechrevo-semantic-tgp.service --no-pager
 nvidia-smi --query-gpu=name,power.limit,enforced.power.limit,power.max_limit,power.draw,temperature.gpu --format=csv
 ```
 
-Do not start a load test unless the service completed successfully and UCC
-still controls the platform profile and cooling devices.
+Do not use this entry for a load test or power-limit activation.
 
 ## Offline validation
 
