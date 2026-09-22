@@ -12,7 +12,7 @@ from package_common import ROOT, NVIDIA_BASE, KERNEL
 
 PATCH = ROOT / "patches/nvidia-gsp-semantic-tgp-v8.patch"
 MODULES = ("nvidia", "nvidia-modeset", "nvidia-uvm", "nvidia-drm", "nvidia-peermem")
-MARKER = "semantic-tgp-v8r3-20260922"
+MARKER = "semantic-tgp-v8r4-20260922"
 
 
 def run(*args, cwd=None):

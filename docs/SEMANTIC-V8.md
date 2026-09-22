@@ -9,10 +9,14 @@ a clean live boot and load test.
 The first two v8 live boots reached WPR2 but their 256 KiB and 64 KiB memory
 descriptors were rejected with `NV_ERR_INVALID_ARGUMENT` before any write. A
 smaller transfer length did not change the allocation descriptor. Revision
-v8r3 therefore uses the exact 4 KiB descriptor and transfer shape already
-verified by v5, and scans a bounded 8 MiB object arena page by page. Every
-transfer error still poisons the boot epoch. Both failed attempts performed
-zero writes and left the stock 175 W maximum intact.
+v8r3 switched to the exact 4 KiB descriptor and transfer shape already
+verified by v5. The transport then succeeded, but the resolver's one-page
+cache repeatedly fetched pages while rejecting false candidates and exhausted
+its 32,768-call budget. It stopped without poisoning the transport or writing
+anything. Revision v8r4 reads the bounded 8 MiB object arena sequentially into
+one temporary snapshot, then performs the same address-free semantic search in
+memory. Every transfer error still poisons the boot epoch. All failed attempts
+performed zero writes and left the stock 175 W maximum intact.
 
 ## What v8 resolves
 
@@ -38,6 +42,11 @@ The isolated entry is named:
 ```text
 CachyOS - NVIDIA Semantic TGP 250W v8
 ```
+
+This entry removes `quiet` and `splash`, disables Plymouth, and enables systemd
+status output. The resolver's progress and final five-second success hold are
+therefore visible directly on the text boot console. The ordinary CachyOS
+entry keeps its original graphical boot arguments.
 
 Before selecting it:
 

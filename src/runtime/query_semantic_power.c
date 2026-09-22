@@ -23,8 +23,8 @@ static int command(int (*next)(int,unsigned long,...),int fd,unsigned long req,c
  GSP_POWER_PROBE_PARAMS p={.version=GSP_POWER_PROBE_VERSION,.operation=operation,.targetMw=target};
  Control q=*info;q.cmd=GSP_POWER_PROBE_CMD;q.params=(uintptr_t)&p;q.size=sizeof(p);q.status=0;
  int rc=next(fd,req,&q);
- fprintf(stderr,"GSP_SEMANTIC {\"op\":%u,\"rc\":%d,\"status\":%u,\"result\":%u,\"stage\":%u,\"resolver\":%u,\"armed\":%u,\"active\":%u,\"poisoned\":%u,\"writes\":%u,\"stock\":%u,\"current\":%u,\"heap_source\":\"0x%llx\",\"heap_size\":%llu,\"va_base\":\"0x%llx\",\"array\":\"0x%llx\",\"board\":\"0x%llx\",\"writers\":[\"0x%llx\",\"0x%llx\",\"0x%llx\"]}\n",
-  operation,rc,q.status,p.result,p.stage,p.resolverStatus,p.armed,p.active,p.poisoned,p.writes,
+ fprintf(stderr,"GSP_SEMANTIC {\"op\":%u,\"rc\":%d,\"status\":%u,\"result\":%u,\"stage\":%u,\"resolver\":%u,\"calls\":%u,\"armed\":%u,\"active\":%u,\"poisoned\":%u,\"writes\":%u,\"stock\":%u,\"current\":%u,\"heap_source\":\"0x%llx\",\"heap_size\":%llu,\"va_base\":\"0x%llx\",\"array\":\"0x%llx\",\"board\":\"0x%llx\",\"writers\":[\"0x%llx\",\"0x%llx\",\"0x%llx\"]}\n",
+  operation,rc,q.status,p.result,p.stage,p.resolverStatus,p.transferCalls,p.armed,p.active,p.poisoned,p.writes,
   p.stockUpperMw,p.currentUpperMw,(unsigned long long)p.heapSource,(unsigned long long)p.heapSize,
   (unsigned long long)p.vaBase,(unsigned long long)p.policyArray,(unsigned long long)p.boardObject,
   (unsigned long long)p.maxEffectiveMember,(unsigned long long)p.maxSourceMember,(unsigned long long)p.pmgrUpperMember);
@@ -50,7 +50,7 @@ static int run_power(int (*next)(int,unsigned long,...),int fd,unsigned long req
 }
 #ifndef PROBE_TEST
 static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
- int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r3-20260922\n");if(f)fclose(f);return ok;}
+ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r4-20260922\n");if(f)fclose(f);return ok;}
 int ioctl(int fd,unsigned long req,...){
  static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
  va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;

@@ -18,7 +18,7 @@
 #include "deprecated/gsp_power_probe.h"
 
 #define TOKEN "codex.semantic_tgp=250"
-#define MARKER "semantic-tgp-v8r3-20260922"
+#define MARKER "semantic-tgp-v8r4-20260922"
 #define TARGET_MW 250000U
 #define GREEN "\033[1;32m"
 #define RED "\033[1;31m"

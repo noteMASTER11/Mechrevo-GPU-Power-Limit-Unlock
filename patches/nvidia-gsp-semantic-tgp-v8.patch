@@ -1,13 +1,13 @@
 diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
-index df5a5e0..5214fdf 100644
+index df5a5e0..0317a0e 100644
 --- a/kernel-open/nvidia/nv.c
 +++ b/kernel-open/nvidia/nv.c
 @@ -119,6 +119,9 @@
  MODULE_LICENSE("Dual MIT/GPL");
  
  MODULE_INFO(supported, "external");
-+MODULE_INFO(gsp_read_probe, "semantic-tgp-v8r3-20260922");
-+static char *gsp_read_probe_build = "semantic-tgp-v8r3-20260922";
++MODULE_INFO(gsp_read_probe, "semantic-tgp-v8r4-20260922");
++static char *gsp_read_probe_build = "semantic-tgp-v8r4-20260922";
 +module_param_named(GspReadProbeBuild, gsp_read_probe_build, charp, 0444);
  MODULE_VERSION(NV_VERSION_STRING);
  MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
@@ -65,7 +65,7 @@ index 0000000..a0519b7
 +path is described as verified.
 diff --git a/research/query_power.c b/research/query_power.c
 new file mode 100644
-index 0000000..ce6e706
+index 0000000..4f9e3f8
 --- /dev/null
 +++ b/research/query_power.c
 @@ -0,0 +1,75 @@
@@ -94,8 +94,8 @@ index 0000000..ce6e706
 + GSP_POWER_PROBE_PARAMS p={.version=GSP_POWER_PROBE_VERSION,.operation=operation,.targetMw=target};
 + Control q=*info;q.cmd=GSP_POWER_PROBE_CMD;q.params=(uintptr_t)&p;q.size=sizeof(p);q.status=0;
 + int rc=next(fd,req,&q);
-+ fprintf(stderr,"GSP_SEMANTIC {\"op\":%u,\"rc\":%d,\"status\":%u,\"result\":%u,\"stage\":%u,\"resolver\":%u,\"armed\":%u,\"active\":%u,\"poisoned\":%u,\"writes\":%u,\"stock\":%u,\"current\":%u,\"heap_source\":\"0x%llx\",\"heap_size\":%llu,\"va_base\":\"0x%llx\",\"array\":\"0x%llx\",\"board\":\"0x%llx\",\"writers\":[\"0x%llx\",\"0x%llx\",\"0x%llx\"]}\n",
-+  operation,rc,q.status,p.result,p.stage,p.resolverStatus,p.armed,p.active,p.poisoned,p.writes,
++ fprintf(stderr,"GSP_SEMANTIC {\"op\":%u,\"rc\":%d,\"status\":%u,\"result\":%u,\"stage\":%u,\"resolver\":%u,\"calls\":%u,\"armed\":%u,\"active\":%u,\"poisoned\":%u,\"writes\":%u,\"stock\":%u,\"current\":%u,\"heap_source\":\"0x%llx\",\"heap_size\":%llu,\"va_base\":\"0x%llx\",\"array\":\"0x%llx\",\"board\":\"0x%llx\",\"writers\":[\"0x%llx\",\"0x%llx\",\"0x%llx\"]}\n",
++  operation,rc,q.status,p.result,p.stage,p.resolverStatus,p.transferCalls,p.armed,p.active,p.poisoned,p.writes,
 +  p.stockUpperMw,p.currentUpperMw,(unsigned long long)p.heapSource,(unsigned long long)p.heapSize,
 +  (unsigned long long)p.vaBase,(unsigned long long)p.policyArray,(unsigned long long)p.boardObject,
 +  (unsigned long long)p.maxEffectiveMember,(unsigned long long)p.maxSourceMember,(unsigned long long)p.pmgrUpperMember);
@@ -121,7 +121,7 @@ index 0000000..ce6e706
 +}
 +#ifndef PROBE_TEST
 +static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
-+ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r3-20260922\n");if(f)fclose(f);return ok;}
++ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r4-20260922\n");if(f)fclose(f);return ok;}
 +int ioctl(int fd,unsigned long req,...){
 + static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
 + va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;
@@ -146,7 +146,7 @@ index 0000000..ce6e706
 +#endif
 diff --git a/research/semantic_boot.c b/research/semantic_boot.c
 new file mode 100644
-index 0000000..35b48fe
+index 0000000..15dbedf
 --- /dev/null
 +++ b/research/semantic_boot.c
 @@ -0,0 +1,193 @@
@@ -170,7 +170,7 @@ index 0000000..35b48fe
 +#include "deprecated/gsp_power_probe.h"
 +
 +#define TOKEN "codex.semantic_tgp=250"
-+#define MARKER "semantic-tgp-v8r3-20260922"
++#define MARKER "semantic-tgp-v8r4-20260922"
 +#define TARGET_MW 250000U
 +#define GREEN "\033[1;32m"
 +#define RED "\033[1;31m"
@@ -1092,7 +1092,7 @@ index 0000000..14c4a32
 +#endif
 diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.h b/src/nvidia/interface/deprecated/gsp_power_probe.h
 new file mode 100644
-index 0000000..0e335f2
+index 0000000..1f33f6c
 --- /dev/null
 +++ b/src/nvidia/interface/deprecated/gsp_power_probe.h
 @@ -0,0 +1,15 @@
@@ -1106,17 +1106,17 @@ index 0000000..0e335f2
 +typedef struct {
 + NvU32 version,operation,targetMw,reserved;
 + NvU32 stage,result,armed,active,poisoned,writes;
-+ NvU32 resolverStatus,resolverCandidates,stockUpperMw,currentUpperMw;
++ NvU32 resolverStatus,transferCalls,stockUpperMw,currentUpperMw;
 + NvU64 heapSource,heapSize,vaBase,policyArray,boardObject;
 + NvU64 maxEffectiveMember,maxSourceMember,pmgrUpperMember;
 +} GSP_POWER_PROBE_PARAMS;
 +#endif
 diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.inc b/src/nvidia/interface/deprecated/gsp_power_probe.inc
 new file mode 100644
-index 0000000..c52e960
+index 0000000..e171aac
 --- /dev/null
 +++ b/src/nvidia/interface/deprecated/gsp_power_probe.inc
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,247 @@
 +/* SPDX-License-Identifier: MIT
 + * Semantic, fail-closed GSP power resolver and writer.  Root/API/GPU locks are
 + * held by the dispatcher.  Userspace supplies an operation and target only.
@@ -1136,6 +1136,8 @@ index 0000000..c52e960
 + NvBool cacheValid;
 + MEMORY_DESCRIPTOR *desc;
 + void *map,*priv;
++ NvU8 *snapshot;
++ NvU32 snapshotBytes;
 + NV_STATUS lastStatus;
 +} GSP_SEMANTIC_CONTEXT;
 +
@@ -1178,7 +1180,8 @@ index 0000000..c52e960
 +{
 + if(c->map!=NULL)memdescUnmapOld(c->desc,NV_TRUE,c->map,c->priv);
 + if(c->desc!=NULL){memdescFree(c->desc);memdescDestroy(c->desc);}
-+ c->map=NULL;c->desc=NULL;c->priv=NULL;
++ if(c->snapshot!=NULL)portMemFree(c->snapshot);
++ c->map=NULL;c->desc=NULL;c->priv=NULL;c->snapshot=NULL;c->snapshotBytes=0;
 +}
 +
 +static NV_STATUS gspSemanticFill(GSP_SEMANTIC_CONTEXT *c,NvU64 offset)
@@ -1217,14 +1220,30 @@ index 0000000..c52e960
 +
 +static int gspSemanticCoreRead(void *opaque,NvU64 offset,void *dest,NvU32 size)
 +{
-+ GSP_SEMANTIC_CONTEXT *c=opaque;c->lastStatus=gspSemanticReadNv(c,offset,dest,size);
-+ return c->lastStatus==NV_OK?0:1;
++ GSP_SEMANTIC_CONTEXT *c=opaque;
++ if(size>c->snapshotBytes||offset>c->snapshotBytes-size)return 1;
++ portMemCopy(dest,size,c->snapshot+offset,size);return 0;
++}
++
++static NV_STATUS gspSemanticSnapshot(GSP_SEMANTIC_CONTEXT *c,NvU32 bytes)
++{
++ NV_STATUS st;NvU32 offset,n;
++ if(c->snapshot!=NULL){portMemFree(c->snapshot);c->snapshot=NULL;c->snapshotBytes=0;}
++ c->snapshot=portMemAllocNonPaged(bytes);if(c->snapshot==NULL)return NV_ERR_NO_MEMORY;
++ for(offset=0;offset<bytes;offset+=4096){
++  st=gspSemanticFill(c,offset);if(st!=NV_OK)return st;
++  n=bytes-offset;if(n>4096)n=4096;
++  portMemCopy(c->snapshot+offset,bytes-offset,c->map,n);
++ }
++ c->snapshotBytes=bytes;return NV_OK;
 +}
 +
 +static NV_STATUS gspSemanticResolve(GSP_SEMANTIC_CONTEXT *c,struct gs_resolution *r,NvU32 *resolverStatus)
 +{
-+ NvU64 scanSize=c->size>GSP_SEMANTIC_SCAN_LIMIT?GSP_SEMANTIC_SCAN_LIMIT:c->size;
-+ struct gs_io io={c,gspSemanticCoreRead,scanSize};int rc=gs_resolve_autonomous(&io,r);
++ NvU32 scanSize=(NvU32)(c->size>GSP_SEMANTIC_SCAN_LIMIT?GSP_SEMANTIC_SCAN_LIMIT:c->size);int rc;NV_STATUS st;
++ struct gs_io io={c,gspSemanticCoreRead,scanSize};
++ st=gspSemanticSnapshot(c,scanSize);if(st!=NV_OK){*resolverStatus=GS_IO;return st;}
++ rc=gs_resolve_autonomous(&io,r);
 + *resolverStatus=(NvU32)rc;
 + if(rc==GS_OK)return NV_OK;if(rc==GS_IO&&c->lastStatus!=NV_OK)return c->lastStatus;
 + return rc==GS_AMBIGUOUS?NV_ERR_INVALID_STATE:NV_ERR_INVALID_DATA;
@@ -1299,7 +1318,7 @@ index 0000000..c52e960
 +static void gspSemanticOutput(GSP_POWER_PROBE_PARAMS *p,GSP_SEMANTIC_CONTEXT *c,const struct gs_resolution *r)
 +{
 + p->armed=gspSemanticState.armed;p->active=gspSemanticState.active;p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;
-+ p->writes=gspSemanticState.writes;p->heapSource=c->source;p->heapSize=c->size;
++ p->writes=gspSemanticState.writes;p->transferCalls=gspProbe_callsUsed;p->heapSource=c->source;p->heapSize=c->size;
 + p->vaBase=r->va_base;p->policyArray=r->policy_array;p->boardObject=r->board_object;
 + p->maxEffectiveMember=r->board_max_effective;p->maxSourceMember=r->board_max_source;p->pmgrUpperMember=r->pmgr_upper;
 + p->stockUpperMw=r->stock_upper_mw;p->currentUpperMw=r->current_upper_mw;
@@ -1342,7 +1361,7 @@ index 0000000..c52e960
 + gspSemanticOutput(p,&c,&r);gspSemanticContextDestroy(&c);
 +output_no_context:
 + p->result=st;p->armed=gspSemanticState.armed;p->active=gspSemanticState.active;
-+ p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;p->writes=gspSemanticState.writes;
++ p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;p->writes=gspSemanticState.writes;p->transferCalls=gspProbe_callsUsed;
 + return NV_OK;
 +}
 diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.h b/src/nvidia/interface/deprecated/gsp_read_probe.h
