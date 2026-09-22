@@ -1,13 +1,13 @@
 diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
-index df5a5e0..0317a0e 100644
+index df5a5e0..ade3c61 100644
 --- a/kernel-open/nvidia/nv.c
 +++ b/kernel-open/nvidia/nv.c
 @@ -119,6 +119,9 @@
  MODULE_LICENSE("Dual MIT/GPL");
  
  MODULE_INFO(supported, "external");
-+MODULE_INFO(gsp_read_probe, "semantic-tgp-v8r4-20260922");
-+static char *gsp_read_probe_build = "semantic-tgp-v8r4-20260922";
++MODULE_INFO(gsp_read_probe, "semantic-tgp-v8r5-20260922");
++static char *gsp_read_probe_build = "semantic-tgp-v8r5-20260922";
 +module_param_named(GspReadProbeBuild, gsp_read_probe_build, charp, 0444);
  MODULE_VERSION(NV_VERSION_STRING);
  MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
@@ -65,10 +65,10 @@ index 0000000..a0519b7
 +path is described as verified.
 diff --git a/research/query_power.c b/research/query_power.c
 new file mode 100644
-index 0000000..4f9e3f8
+index 0000000..8e6e824
 --- /dev/null
 +++ b/research/query_power.c
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,102 @@
 +#define _GNU_SOURCE
 +#include <dlfcn.h>
 +#include <stdarg.h>
@@ -86,8 +86,36 @@ index 0000000..4f9e3f8
 +typedef struct {uint32_t client,object,cmd,flags;uint64_t params;uint32_t size,status;} Control;
 +_Static_assert(sizeof(Control)==32,"NVOS54");
 +_Static_assert(sizeof(GSP_POWER_PROBE_PARAMS)==120,"semantic power ABI");
++#define BASE_TGP_GET 0x2080a61aU
++#define BASE_TGP_SET 0x2080e61bU
++#define BASE_TGP_SIZE 0x3634U
++#define BASE_TGP_FULL_MASK ((1U<<2)|(1U<<13)|(1U<<14))
 +static int semanticSeen,semanticResult=-1;
 +static GSP_POWER_PROBE_PARAMS semanticLast;
++
++static uint32_t get32(const unsigned char *p){uint32_t v;memcpy(&v,p,4);return v;}
++static void put32(unsigned char *p,uint32_t v){memcpy(p,&v,4);}
++static unsigned char *base_entry(unsigned char *p,unsigned i){return p+0x14U+i*0xc4U;}
++static int base_tgp_set(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,
++                        unsigned stock,unsigned target){
++ unsigned char *p=calloc(1,BASE_TGP_SIZE);Control q=*info;int rc=-1,call;uint32_t source13,source14,current;
++ if(!p)return -1;
++ put32(p+0x10,BASE_TGP_FULL_MASK);q.cmd=BASE_TGP_GET;q.params=(uintptr_t)p;q.size=BASE_TGP_SIZE;q.status=0;
++ call=next(fd,req,&q);current=get32(base_entry(p,2)+4);source13=get32(base_entry(p,13)+4);source14=get32(base_entry(p,14)+4);
++ fprintf(stderr,"GSP_BASE_TGP {\"stage\":\"get\",\"rc\":%d,\"status\":%u,\"current\":%u,\"source13\":%u,\"source14\":%u}\n",call,q.status,current,source13,source14);
++ if(call||q.status||get32(p+0x10)!=BASE_TGP_FULL_MASK||get32(base_entry(p,2))!=0||current<5000||current>stock||
++    get32(base_entry(p,13))!=0x12||source13<5000||source13>400000||get32(base_entry(p,14))!=0x12||source14<5000||source14>400000)goto done;
++ /* SET is deliberately one-shot. Only policy 2 is present in the mask; the
++  * Dynamic Boost source entries remain untouched. A failed result is uncertain
++  * and must never be retried in the same boot. */
++ memset(p,0,BASE_TGP_SIZE);put32(p+0x10,1U<<2);put32(base_entry(p,2),0);put32(base_entry(p,2)+4,target);
++ q=*info;q.cmd=BASE_TGP_SET;q.params=(uintptr_t)p;q.size=BASE_TGP_SIZE;q.status=0;call=next(fd,req,&q);
++ fprintf(stderr,"GSP_BASE_TGP {\"stage\":\"set\",\"rc\":%d,\"status\":%u}\n",call,q.status);if(call||q.status)goto done;
++ memset(p,0,BASE_TGP_SIZE);put32(p+0x10,BASE_TGP_FULL_MASK);q=*info;q.cmd=BASE_TGP_GET;q.params=(uintptr_t)p;q.size=BASE_TGP_SIZE;q.status=0;call=next(fd,req,&q);
++ fprintf(stderr,"GSP_BASE_TGP {\"stage\":\"verify\",\"rc\":%d,\"status\":%u,\"current\":%u,\"source13\":%u,\"source14\":%u}\n",call,q.status,get32(base_entry(p,2)+4),get32(base_entry(p,13)+4),get32(base_entry(p,14)+4));
++ if(!call&&!q.status&&get32(base_entry(p,2)+4)==target&&get32(base_entry(p,13)+4)==source13&&get32(base_entry(p,14)+4)==source14)rc=0;
++done:free(p);return rc;
++}
 +
 +static int command(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,
 +                   unsigned operation,unsigned target,unsigned stock,GSP_POWER_PROBE_PARAMS *out){
@@ -107,7 +135,6 @@ index 0000000..4f9e3f8
 + if(operation==0&&(p.armed||p.active||p.writes))return -1;
 + if(operation==1&&(!p.armed||p.active||p.writes))return -1;
 + if(operation==2&&(!p.armed||p.active||p.writes!=3))return -1;
-+ if(operation==6&&(!p.armed||!p.active||p.writes!=3))return -1;
 + return 0;
 +}
 +static int run_power(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,unsigned target,int activate){
@@ -117,11 +144,11 @@ index 0000000..4f9e3f8
 + if(!activate)return 0;
 + if(command(next,fd,req,info,1,target,stock,NULL))return -1;
 + if(command(next,fd,req,info,2,target,stock,NULL))return -1;
-+ return command(next,fd,req,info,6,target,stock,NULL);
++ return base_tgp_set(next,fd,req,info,stock,target);
 +}
 +#ifndef PROBE_TEST
 +static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
-+ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r4-20260922\n");if(f)fclose(f);return ok;}
++ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r5-20260922\n");if(f)fclose(f);return ok;}
 +int ioctl(int fd,unsigned long req,...){
 + static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
 + va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;
@@ -146,7 +173,7 @@ index 0000000..4f9e3f8
 +#endif
 diff --git a/research/semantic_boot.c b/research/semantic_boot.c
 new file mode 100644
-index 0000000..15dbedf
+index 0000000..bb6ff89
 --- /dev/null
 +++ b/research/semantic_boot.c
 @@ -0,0 +1,193 @@
@@ -170,7 +197,7 @@ index 0000000..15dbedf
 +#include "deprecated/gsp_power_probe.h"
 +
 +#define TOKEN "codex.semantic_tgp=250"
-+#define MARKER "semantic-tgp-v8r4-20260922"
++#define MARKER "semantic-tgp-v8r5-20260922"
 +#define TARGET_MW 250000U
 +#define GREEN "\033[1;32m"
 +#define RED "\033[1;31m"
@@ -338,9 +365,9 @@ index 0000000..15dbedf
 +    setenv("CODEX_GSP_POWER_MODE","activate",1);setenv("CODEX_GSP_TARGET_MW","250000",1);
 +    if(run_nvml(&current,&maximum,name,sizeof(name))){finish_record("failed","semantic transaction failed",current,maximum);line("[FAILED]","semantic transaction failed");return 1;}
 +    if(current!=TARGET_MW||maximum!=TARGET_MW){finish_record("failed","NVML readback mismatch",current,maximum);line("[FAILED]","NVML readback mismatch");return 1;}
-+    if(!semantic_transaction_last()->active||semantic_transaction_last()->writes!=3){finish_record("failed","driver state mismatch",current,maximum);line("[FAILED]","driver state mismatch");return 1;}
++    if(!semantic_transaction_last()->armed||semantic_transaction_last()->active||semantic_transaction_last()->writes!=3){finish_record("failed","driver state mismatch",current,maximum);line("[FAILED]","driver state mismatch");return 1;}
 +    snprintf(message,sizeof(message),"%s exposes a verified %u W limit",name,current/1000);line("[SUCCESS]",message);
-+    finish_record("verified_250w",NULL,current,maximum);line("[SUCCESS]","Semantic TGP transaction completed; Dynamic Boost source is disabled");
++    finish_record("verified_250w",NULL,current,maximum);line("[SUCCESS]","Semantic ceilings and the base TGP policy are verified; Dynamic Boost remains disabled");
 +    line("[....]","Holding the success screen for 5 seconds");sleep(5);return 0;
 +}
 diff --git a/research/semantic_core.c b/research/semantic_core.c
@@ -1032,64 +1059,6 @@ index 0000000..94a0f09
 +
 +if __name__ == '__main__':
 +    unittest.main()
-diff --git a/src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h b/src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h
-new file mode 100644
-index 0000000..14c4a32
---- /dev/null
-+++ b/src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h
-@@ -0,0 +1,52 @@
-+/* SPDX-License-Identifier: MIT
-+ * Fixed 615.71.09 PMGR control layout used by the direct-TGP v7 experiment.
-+ * Callers still have to bind the live PMGR object and validate GPU identity.
-+ */
-+#ifndef CODEX_GSP_DIRECT_TGP_LAYOUT_H
-+#define CODEX_GSP_DIRECT_TGP_LAYOUT_H
-+#define GSP_DIRECT_TGP_GET_CONTROL 0x2080a61aU
-+#define GSP_DIRECT_TGP_SET_CONTROL 0x2080e61bU
-+#define GSP_DIRECT_TGP_CONTROL_SIZE 0x3634U
-+#define GSP_DIRECT_TGP_MASK ((1U << 2) | (1U << 13) | (1U << 14))
-+#define GSP_DIRECT_TGP_ENTRY_BASE 0x14U
-+#define GSP_DIRECT_TGP_ENTRY_STRIDE 0xc4U
-+static NvU8 *gspDirectTgpEntry(NvU8 *control,NvU32 index)
-+{
-+ return control+GSP_DIRECT_TGP_ENTRY_BASE+index*GSP_DIRECT_TGP_ENTRY_STRIDE;
-+}
-+static NvU32 gspDirectTgpGetU32(const NvU8 *p)
-+{
-+ NvU32 v;portMemCopy(&v,sizeof(v),p,sizeof(v));return v;
-+}
-+static void gspDirectTgpPutU32(NvU8 *p,NvU32 v)
-+{
-+ portMemCopy(p,4,&v,4);
-+}
-+static NV_STATUS gspDirectTgpValidateControl(NvU8 *control,NvU32 baseValue,NvU32 entry13Value,NvU32 entry14Value)
-+{
-+ NvU8 *e2=gspDirectTgpEntry(control,2),*e13=gspDirectTgpEntry(control,13),*e14=gspDirectTgpEntry(control,14);
-+ if(gspDirectTgpGetU32(control+0x10)!=GSP_DIRECT_TGP_MASK ||
-+    gspDirectTgpGetU32(e2)!=0 || gspDirectTgpGetU32(e2+4)!=baseValue ||
-+    gspDirectTgpGetU32(e13)!=0x12 || gspDirectTgpGetU32(e13+4)!=entry13Value ||
-+    gspDirectTgpGetU32(e14)!=0x12 || gspDirectTgpGetU32(e14+4)!=entry14Value)
-+  return NV_ERR_INVALID_DATA;
-+ return NV_OK;
-+}
-+static NV_STATUS gspDirectTgpValidateSource(NvU8 *control)
-+{
-+ NvU8 *e2=gspDirectTgpEntry(control,2),*e13=gspDirectTgpEntry(control,13),*e14=gspDirectTgpEntry(control,14);
-+ NvU32 v13=gspDirectTgpGetU32(e13+4),v14=gspDirectTgpGetU32(e14+4);
-+ if(gspDirectTgpGetU32(control+0x10)!=GSP_DIRECT_TGP_MASK||
-+    gspDirectTgpGetU32(e2)!=0||gspDirectTgpGetU32(e2+4)!=0xffffffffU||
-+    gspDirectTgpGetU32(e13)!=0x12||gspDirectTgpGetU32(e14)!=0x12||
-+    v13<50000U||v13>400000U||v14<10000U||v14>400000U)
-+  return NV_ERR_INVALID_DATA;
-+ return NV_OK;
-+}
-+static void gspDirectTgpPrepareTarget(NvU8 *control,NvU32 targetMw)
-+{
-+ gspDirectTgpPutU32(gspDirectTgpEntry(control,2)+4,targetMw);
-+ gspDirectTgpPutU32(gspDirectTgpEntry(control,13)+4,targetMw);
-+ gspDirectTgpPutU32(gspDirectTgpEntry(control,14)+4,targetMw-150000U);
-+}
-+#endif
 diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.h b/src/nvidia/interface/deprecated/gsp_power_probe.h
 new file mode 100644
 index 0000000..1f33f6c
@@ -1113,16 +1082,15 @@ index 0000000..1f33f6c
 +#endif
 diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.inc b/src/nvidia/interface/deprecated/gsp_power_probe.inc
 new file mode 100644
-index 0000000..e171aac
+index 0000000..94a16e6
 --- /dev/null
 +++ b/src/nvidia/interface/deprecated/gsp_power_probe.inc
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,218 @@
 +/* SPDX-License-Identifier: MIT
 + * Semantic, fail-closed GSP power resolver and writer.  Root/API/GPU locks are
 + * held by the dispatcher.  Userspace supplies an operation and target only.
 + */
 +#include "deprecated/gsp_semantic_adapter.inc"
-+#include "deprecated/gsp_direct_tgp_layout.h"
 +
 +#define GSP_SEMANTIC_CACHE_SIZE 4096U
 +#define GSP_SEMANTIC_SCAN_LIMIT (8ULL * 1024ULL * 1024ULL)
@@ -1147,8 +1115,6 @@ index 0000000..e171aac
 +} GSP_SEMANTIC_STATE;
 +
 +static GSP_SEMANTIC_STATE gspSemanticState;
-+typedef struct { NvU32 used,active,poisoned; } GSP_DIRECT_TGP_STATE;
-+static GSP_DIRECT_TGP_STATE gspDirectTgpState;
 +
 +static NV_STATUS gspSemanticContextInit(OBJGPU *g,GSP_SEMANTIC_CONTEXT *c)
 +{
@@ -1290,31 +1256,6 @@ index 0000000..e171aac
 +  a->pmgr_upper==b->pmgr_upper;
 +}
 +
-+static NV_STATUS gspSemanticDirectSet(GSP_SEMANTIC_CONTEXT *c,NvU32 target,GSP_POWER_PROBE_PARAMS *p)
-+{
-+ OBJGPU *g=c->gpu;RM_API *api=GPU_GET_PHYSICAL_RMAPI(g);NvU8 *control=NULL;NV_STATUS st;
-+ if(gspDirectTgpState.used||gspDirectTgpState.poisoned||!gspSemanticState.ceilings)return NV_ERR_INVALID_STATE;
-+ control=portMemAllocNonPaged(GSP_DIRECT_TGP_CONTROL_SIZE);if(control==NULL)return NV_ERR_NO_MEMORY;
-+ portMemSet(control,0,GSP_DIRECT_TGP_CONTROL_SIZE);gspDirectTgpPutU32(control+0x10,GSP_DIRECT_TGP_MASK);
-+ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,GSP_DIRECT_TGP_GET_CONTROL,control,GSP_DIRECT_TGP_CONTROL_SIZE);
-+ if(st!=NV_OK)goto done;st=gspDirectTgpValidateSource(control);if(st!=NV_OK)goto done;
-+ p->stage=31;st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
-+  NV2080_CTRL_CMD_INTERNAL_PMGR_UNSET_DYNAMIC_BOOST_LIMIT,NULL,0);
-+ if(st==NV_ERR_INVALID_DATA)st=NV_OK;if(st!=NV_OK)goto uncertain;
-+ gspDirectTgpPrepareTarget(control,target);gspDirectTgpState.used=1;p->stage=32;
-+ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,GSP_DIRECT_TGP_SET_CONTROL,control,GSP_DIRECT_TGP_CONTROL_SIZE);
-+ if(st!=NV_OK)goto uncertain;
-+ portMemSet(control,0,GSP_DIRECT_TGP_CONTROL_SIZE);gspDirectTgpPutU32(control+0x10,GSP_DIRECT_TGP_MASK);p->stage=33;
-+ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,GSP_DIRECT_TGP_GET_CONTROL,control,GSP_DIRECT_TGP_CONTROL_SIZE);
-+ if(st!=NV_OK)goto uncertain;
-+ st=gspDirectTgpValidateControl(control,target,target,target-150000U);if(st!=NV_OK)goto uncertain;
-+ gspDirectTgpState.active=1;gspSemanticState.active=1;p->stage=100;goto done;
-+uncertain:
-+ gspDirectTgpState.poisoned=1;gspSemanticState.poisoned=1;gspProbe_poisoned=NV_TRUE;
-+done:
-+ if(control!=NULL)portMemFree(control);return st;
-+}
-+
 +static void gspSemanticOutput(GSP_POWER_PROBE_PARAMS *p,GSP_SEMANTIC_CONTEXT *c,const struct gs_resolution *r)
 +{
 + p->armed=gspSemanticState.armed;p->active=gspSemanticState.active;p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;
@@ -1328,7 +1269,7 @@ index 0000000..e171aac
 +{
 + GSP_SEMANTIC_CONTEXT c={0};struct gs_resolution r={0},after={0};NV_STATUS st;NvU32 a,b,d,operation,target;
 + if(size!=sizeof(*p)||p->version!=GSP_POWER_PROBE_VERSION||p->reserved||
-+    (p->operation!=0&&p->operation!=1&&p->operation!=2&&p->operation!=6)||
++    (p->operation!=0&&p->operation!=1&&p->operation!=2)||
 +    p->targetMw<GSP_POWER_TARGET_MIN_MW||p->targetMw>GSP_POWER_TARGET_MAX_MW||p->targetMw<150000U)
 +  return NV_ERR_INVALID_ARGUMENT;
 + operation=p->operation;target=p->targetMw;portMemSet((NvU8*)p+16,0,sizeof(*p)-16);p->stage=1;
@@ -1355,8 +1296,7 @@ index 0000000..e171aac
 +  if(st!=NV_OK||!gspSemanticSame(&r,&after)||after.current_upper_mw!=target){if(st==NV_OK)st=NV_ERR_INVALID_STATE;gspSemanticState.poisoned=1;goto output;}
 +  gspSemanticState.ceilings=1;gspSemanticState.resolution=after;r=after;p->stage=100;goto output;
 + }
-+ if(!gspSemanticState.ceilings||gspSemanticState.active||a!=target||b!=target||d!=target){st=NV_ERR_INVALID_STATE;goto output;}
-+ p->stage=30;st=gspSemanticDirectSet(&c,target,p);
++ st=NV_ERR_INVALID_ARGUMENT;
 +output:
 + gspSemanticOutput(p,&c,&r);gspSemanticContextDestroy(&c);
 +output_no_context:
@@ -1585,32 +1525,3 @@ index 91e69d5..4b5d18b 100644
      if (IS_VIRTUAL(pGpu))
      {
          NV_RM_RPC_API_CONTROL(pGpu,
-diff --git a/tests_direct_tgp_layout.c b/tests_direct_tgp_layout.c
-new file mode 100644
-index 0000000..d4edb45
---- /dev/null
-+++ b/tests_direct_tgp_layout.c
-@@ -0,0 +1,23 @@
-+/* SPDX-License-Identifier: MIT */
-+#include <assert.h>
-+#include <stdint.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+typedef uint8_t NvU8;typedef uint32_t NvU32;typedef int NV_STATUS;
-+#define NV_OK 0
-+#define NV_ERR_INVALID_DATA 1
-+#define portMemCopy(d,ds,s,ss) memcpy((d),(s),(ss))
-+#include "src/nvidia/interface/deprecated/gsp_direct_tgp_layout.h"
-+int main(int argc,char **argv)
-+{
-+ FILE *f;NvU8 *b;long n;
-+ assert(argc==2);f=fopen(argv[1],"rb");assert(f);assert(!fseek(f,0,SEEK_END));n=ftell(f);
-+ assert(n==GSP_DIRECT_TGP_CONTROL_SIZE);rewind(f);b=calloc(1,(size_t)n);assert(b);
-+ assert(fread(b,1,(size_t)n,f)==(size_t)n);fclose(f);
-+ assert(gspDirectTgpValidateControl(b,0xffffffffU,210000U,60000U)==NV_OK);
-+ gspDirectTgpPrepareTarget(b);
-+ assert(gspDirectTgpValidateControl(b,250000U,250000U,100000U)==NV_OK);
-+ assert(gspDirectTgpGetU32(b+0x10)==GSP_DIRECT_TGP_MASK);
-+ free(b);puts("direct TGP layout fixture: PASS");return 0;
-+}

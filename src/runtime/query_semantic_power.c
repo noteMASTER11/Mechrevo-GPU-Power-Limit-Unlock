@@ -15,8 +15,36 @@
 typedef struct {uint32_t client,object,cmd,flags;uint64_t params;uint32_t size,status;} Control;
 _Static_assert(sizeof(Control)==32,"NVOS54");
 _Static_assert(sizeof(GSP_POWER_PROBE_PARAMS)==120,"semantic power ABI");
+#define BASE_TGP_GET 0x2080a61aU
+#define BASE_TGP_SET 0x2080e61bU
+#define BASE_TGP_SIZE 0x3634U
+#define BASE_TGP_FULL_MASK ((1U<<2)|(1U<<13)|(1U<<14))
 static int semanticSeen,semanticResult=-1;
 static GSP_POWER_PROBE_PARAMS semanticLast;
+
+static uint32_t get32(const unsigned char *p){uint32_t v;memcpy(&v,p,4);return v;}
+static void put32(unsigned char *p,uint32_t v){memcpy(p,&v,4);}
+static unsigned char *base_entry(unsigned char *p,unsigned i){return p+0x14U+i*0xc4U;}
+static int base_tgp_set(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,
+                        unsigned stock,unsigned target){
+ unsigned char *p=calloc(1,BASE_TGP_SIZE);Control q=*info;int rc=-1,call;uint32_t source13,source14,current;
+ if(!p)return -1;
+ put32(p+0x10,BASE_TGP_FULL_MASK);q.cmd=BASE_TGP_GET;q.params=(uintptr_t)p;q.size=BASE_TGP_SIZE;q.status=0;
+ call=next(fd,req,&q);current=get32(base_entry(p,2)+4);source13=get32(base_entry(p,13)+4);source14=get32(base_entry(p,14)+4);
+ fprintf(stderr,"GSP_BASE_TGP {\"stage\":\"get\",\"rc\":%d,\"status\":%u,\"current\":%u,\"source13\":%u,\"source14\":%u}\n",call,q.status,current,source13,source14);
+ if(call||q.status||get32(p+0x10)!=BASE_TGP_FULL_MASK||get32(base_entry(p,2))!=0||current<5000||current>stock||
+    get32(base_entry(p,13))!=0x12||source13<5000||source13>400000||get32(base_entry(p,14))!=0x12||source14<5000||source14>400000)goto done;
+ /* SET is deliberately one-shot. Only policy 2 is present in the mask; the
+  * Dynamic Boost source entries remain untouched. A failed result is uncertain
+  * and must never be retried in the same boot. */
+ memset(p,0,BASE_TGP_SIZE);put32(p+0x10,1U<<2);put32(base_entry(p,2),0);put32(base_entry(p,2)+4,target);
+ q=*info;q.cmd=BASE_TGP_SET;q.params=(uintptr_t)p;q.size=BASE_TGP_SIZE;q.status=0;call=next(fd,req,&q);
+ fprintf(stderr,"GSP_BASE_TGP {\"stage\":\"set\",\"rc\":%d,\"status\":%u}\n",call,q.status);if(call||q.status)goto done;
+ memset(p,0,BASE_TGP_SIZE);put32(p+0x10,BASE_TGP_FULL_MASK);q=*info;q.cmd=BASE_TGP_GET;q.params=(uintptr_t)p;q.size=BASE_TGP_SIZE;q.status=0;call=next(fd,req,&q);
+ fprintf(stderr,"GSP_BASE_TGP {\"stage\":\"verify\",\"rc\":%d,\"status\":%u,\"current\":%u,\"source13\":%u,\"source14\":%u}\n",call,q.status,get32(base_entry(p,2)+4),get32(base_entry(p,13)+4),get32(base_entry(p,14)+4));
+ if(!call&&!q.status&&get32(base_entry(p,2)+4)==target&&get32(base_entry(p,13)+4)==source13&&get32(base_entry(p,14)+4)==source14)rc=0;
+done:free(p);return rc;
+}
 
 static int command(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,
                    unsigned operation,unsigned target,unsigned stock,GSP_POWER_PROBE_PARAMS *out){
@@ -36,7 +64,6 @@ static int command(int (*next)(int,unsigned long,...),int fd,unsigned long req,c
  if(operation==0&&(p.armed||p.active||p.writes))return -1;
  if(operation==1&&(!p.armed||p.active||p.writes))return -1;
  if(operation==2&&(!p.armed||p.active||p.writes!=3))return -1;
- if(operation==6&&(!p.armed||!p.active||p.writes!=3))return -1;
  return 0;
 }
 static int run_power(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,unsigned target,int activate){
@@ -46,11 +73,11 @@ static int run_power(int (*next)(int,unsigned long,...),int fd,unsigned long req
  if(!activate)return 0;
  if(command(next,fd,req,info,1,target,stock,NULL))return -1;
  if(command(next,fd,req,info,2,target,stock,NULL))return -1;
- return command(next,fd,req,info,6,target,stock,NULL);
+ return base_tgp_set(next,fd,req,info,stock,target);
 }
 #ifndef PROBE_TEST
 static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
- int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r4-20260922\n");if(f)fclose(f);return ok;}
+ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r5-20260922\n");if(f)fclose(f);return ok;}
 int ioctl(int fd,unsigned long req,...){
  static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
  va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;
