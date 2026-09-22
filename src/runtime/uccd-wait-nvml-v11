@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+token=codex.semantic_tgp=250-v11
+if ! grep -qw "$token" /proc/cmdline; then
+    exit 0
+fi
+
+attempt=0
+while [ "$attempt" -lt 120 ]; do
+    if /usr/bin/nvidia-smi -L >/dev/null 2>&1; then
+        exit 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+
+echo "UCC V11 preflight: NVML did not become ready within 120 seconds" >&2
+exit 1

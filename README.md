@@ -22,7 +22,7 @@ The result is address-free with respect to the live power topology: user space s
 
 - `core/` and `include/`: portable semantic resolver and contract code.
 - `patches/nvidia-gsp-unified-tgp-v11.patch`: production patch for the pinned NVIDIA open-module source.
-- `src/runtime/`: standalone C launcher and systemd units.
+- `src/runtime/`: standalone C launcher, systemd units, and the V11 UCC/NVML readiness guard.
 - `scripts/build_unified_v11.py`: reproducible build without installation.
 - `tests/`: synthetic relocation, ambiguity, active-state, and contract tests.
 - `tools/diagnostics/`: read-only diagnostic utilities.
@@ -41,6 +41,6 @@ The build script pins NVIDIA source commit `61dcc93722ecb418bb5f2e00923f05b4b805
 
 The tested host is MECHREVO YAOSHI Series-X6AR55xY, GPU `10de:2c19`, subsystem `1d05:6041`, CachyOS kernel `7.2.6-1-cachyos`, NVIDIA/GSP `615.71.09`, and VBIOS `98.03.5E.00.5C`. Treat other hardware or driver versions as ports requiring fresh validation.
 
-Before activation, software that writes GPU TGP must yield ownership. On the tested host UCC remained active for system profile, fan, and water-cooler control while its **Max TGP** mode stopped TGP writes. Dynamic Boost service `nvidia-powerd` was disabled only for the dedicated V11 boot.
+Before activation, software that writes GPU TGP must yield ownership. On the tested host UCC remained active for system profile, fan, and water-cooler control while its **Max TGP** mode stopped TGP writes. Dynamic Boost service `nvidia-powerd` was disabled only for the dedicated V11 boot. Install `uccd-wait-nvml-v11` and its drop-in to make UCC wait for NVML readiness; otherwise an early UCC start can leave GPU telemetry unavailable until the daemon is restarted.
 
 See [LICENSES.md](LICENSES.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
