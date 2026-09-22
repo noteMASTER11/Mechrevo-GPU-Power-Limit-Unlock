@@ -18,7 +18,7 @@
 #include "deprecated/gsp_power_probe.h"
 
 #define TOKEN "codex.semantic_tgp=250"
-#define MARKER "semantic-tgp-v8r5-20260922"
+#define MARKER "semantic-tgp-v8r4-20260922"
 #define TARGET_MW 250000U
 #define GREEN "\033[1;32m"
 #define RED "\033[1;31m"
@@ -186,8 +186,8 @@ int main(void)
     setenv("CODEX_GSP_POWER_MODE","activate",1);setenv("CODEX_GSP_TARGET_MW","250000",1);
     if(run_nvml(&current,&maximum,name,sizeof(name))){finish_record("failed","semantic transaction failed",current,maximum);line("[FAILED]","semantic transaction failed");return 1;}
     if(current!=TARGET_MW||maximum!=TARGET_MW){finish_record("failed","NVML readback mismatch",current,maximum);line("[FAILED]","NVML readback mismatch");return 1;}
-    if(!semantic_transaction_last()->armed||semantic_transaction_last()->active||semantic_transaction_last()->writes!=3){finish_record("failed","driver state mismatch",current,maximum);line("[FAILED]","driver state mismatch");return 1;}
+    if(!semantic_transaction_last()->active||semantic_transaction_last()->writes!=3){finish_record("failed","driver state mismatch",current,maximum);line("[FAILED]","driver state mismatch");return 1;}
     snprintf(message,sizeof(message),"%s exposes a verified %u W limit",name,current/1000);line("[SUCCESS]",message);
-    finish_record("verified_250w",NULL,current,maximum);line("[SUCCESS]","Semantic ceilings and the base TGP policy are verified; Dynamic Boost remains disabled");
+    finish_record("verified_250w",NULL,current,maximum);line("[SUCCESS]","Semantic TGP transaction completed; Dynamic Boost source is disabled");
     line("[....]","Holding the success screen for 5 seconds");sleep(5);return 0;
 }

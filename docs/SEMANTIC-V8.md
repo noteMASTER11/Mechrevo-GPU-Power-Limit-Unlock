@@ -13,21 +13,10 @@ v8r3 switched to the exact 4 KiB descriptor and transfer shape already
 verified by v5. The transport then succeeded, but the resolver's one-page
 cache repeatedly fetched pages while rejecting false candidates and exhausted
 its 32,768-call budget. It stopped without poisoning the transport or writing
-anything. Revision v8r4 read the bounded 8 MiB object arena sequentially into
-one temporary snapshot and successfully found the same live topology as v5. It
-raised all three discovered ceilings from 175 W to 250 W with verified
-readback. Its final direct-TGP request used an internal RM client, where policy
-GET returned `NV_ERR_NOT_SUPPORTED`; CURRENT therefore remained 80 W.
-
-The same policy GET succeeds through the external RM client that NVML already
-uses. A diagnostic request confirmed policy 2 is the base CURRENT entry. An
-experimental request that also selected source entries 13 and 14 partially
-changed policy 2 and then failed; retrying after that uncertain partial result
-halted the PMU and required a reboot. Revision v8r5 consequently sends exactly
-one SET on a clean boot, with only policy 2 present in its mask. It never
-selects Dynamic Boost source entries and never retries a failed SET. Every
-transport or control error stops the boot transaction. The ordinary CachyOS
-entry remains the recovery path.
+anything. Revision v8r4 reads the bounded 8 MiB object arena sequentially into
+one temporary snapshot, then performs the same address-free semantic search in
+memory. Every transfer error still poisons the boot epoch. All failed attempts
+performed zero writes and left the stock 175 W maximum intact.
 
 ## What v8 resolves
 
@@ -69,15 +58,14 @@ Before selecting it:
 
 The boot service runs one compiled C executable. It waits for GSP-RM and UCC,
 verifies that `nvidia-powerd` has yielded Dynamic Boost ownership, loads NVML,
-and runs `inspect`, `arm`, and `ceilings` through the private owner command.
-The same process then uses NVML's existing external RM client for one base-TGP
-SET containing policy 2 only, followed by GET and NVML readback. It requires no
-Python installation, virtual environment, `LD_PRELOAD`, or separate shared
-object. Console output includes green `[SUCCESS]` records for the unique
-resolution, verified ceiling writes, and the final 250 W NVML limit. A verified
-success remains on screen for five seconds. Any ambiguity, unexpected
-pre-state, transfer error, readback mismatch, active competing TGP request, or
-wrong module marker stops the transaction.
+and runs operations `inspect`, `arm`, `ceilings`, and `direct set` through its
+in-process ioctl adapter. It requires no Python installation, virtual
+environment, `LD_PRELOAD`, or separate shared object. Console output includes
+green `[SUCCESS]` records for the unique resolution, verified ceiling writes,
+and the final 250 W NVML limit. A verified success remains on screen for five
+seconds. Any ambiguity, unexpected pre-state, transfer error, readback
+mismatch, active competing TGP request, or wrong module marker stops the
+transaction.
 
 After boot, collect the result with:
 

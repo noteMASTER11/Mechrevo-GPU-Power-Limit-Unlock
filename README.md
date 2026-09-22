@@ -19,12 +19,11 @@ The same portable C core is compiled both by the offline tests and by the
 in-tree NVIDIA owner adapter. The adapter re-resolves before mutation and after
 the three ceiling writes; each write uses compare-before-write and immediate
 readback. A standalone C boot runner loads NVML and drives the transaction
-without Python, a virtual environment, or a separate preload library. After
-the driver verifies the ceilings, the runner uses NVML's external RM client for
-one policy-2-only SET of the 250 W base TGP. It does not select or modify the
-Dynamic Boost source entries. UCC stays active and must be placed in **Max
-TGP** mode so it yields GPU TGP ownership while retaining platform-profile,
-fan, and water-cooler control.
+without Python, a virtual environment, or a separate preload library. The
+prepared boot transaction sets a fixed 250 W base policy and removes the
+Dynamic Boost source. UCC stays active and must be placed in **Max TGP** mode so
+it yields GPU TGP ownership while retaining platform-profile, fan, and
+water-cooler control.
 
 This removes dependency on the previously captured live addresses and private
 object member offsets. It does not yet remove every compatibility boundary:
