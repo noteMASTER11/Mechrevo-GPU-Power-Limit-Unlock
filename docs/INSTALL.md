@@ -38,7 +38,7 @@ NVML exposes supported public readings, not every internal policy limit. `N/A` i
 Use a working installation of the exact kernel and matching headers, NVIDIA 615.71.09 userspace tools/firmware, and an existing stock Limine boot entry. Keep the stock kernel/modules and a working recovery entry. On that CachyOS installation:
 
 ```sh
-sudo pacman -S --needed base-devel git python clang lld elfutils mkinitcpio pciutils
+sudo pacman -S --needed base-devel git python clang lld elfutils mkinitcpio pciutils systemd-libs
 ```
 
 The matching headers must already be available at `/usr/lib/modules/7.2.6-1-cachyos/build`. A rolling-release update may no longer supply this version. Obtain the matching kernel/header/userspace packages from your existing package cache or trusted CachyOS package archive; these scripts do not downgrade packages or substitute newer versions. Do not mix the pinned module source with a different NVIDIA userspace release. Secure Boot/module-signing setups require their own signing procedure and are not implemented here.

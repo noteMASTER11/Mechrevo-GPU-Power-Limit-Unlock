@@ -15,6 +15,8 @@
 typedef struct {uint32_t client,object,cmd,flags;uint64_t params;uint32_t size,status;} Control;
 _Static_assert(sizeof(Control)==32,"NVOS54");
 _Static_assert(sizeof(GSP_POWER_PROBE_PARAMS)==120,"semantic power ABI");
+static int semanticSeen,semanticResult=-1;
+static GSP_POWER_PROBE_PARAMS semanticLast;
 
 static int command(int (*next)(int,unsigned long,...),int fd,unsigned long req,const Control *info,
                    unsigned operation,unsigned target,unsigned stock,GSP_POWER_PROBE_PARAMS *out){
@@ -27,6 +29,7 @@ static int command(int (*next)(int,unsigned long,...),int fd,unsigned long req,c
   (unsigned long long)p.vaBase,(unsigned long long)p.policyArray,(unsigned long long)p.boardObject,
   (unsigned long long)p.maxEffectiveMember,(unsigned long long)p.maxSourceMember,(unsigned long long)p.pmgrUpperMember);
  if(out)*out=p;
+ semanticLast=p;
  if(rc||q.status||p.result||p.stage!=100||p.poisoned||p.resolverStatus||p.version!=GSP_POWER_PROBE_VERSION)return -1;
  if(operation==1&&p.currentUpperMw!=stock)return -1;
  if(operation>=2&&p.currentUpperMw!=target)return -1;
@@ -47,7 +50,7 @@ static int run_power(int (*next)(int,unsigned long,...),int fd,unsigned long req
 }
 #ifndef PROBE_TEST
 static int marker_ok(void){char b[80]={0};FILE *f=fopen("/sys/module/nvidia/parameters/GspReadProbeBuild","r");
- int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r2-20260922\n");if(f)fclose(f);return ok;}
+ int ok=f&&fgets(b,sizeof(b),f)&&!strcmp(b,"semantic-tgp-v8r3-20260922\n");if(f)fclose(f);return ok;}
 int ioctl(int fd,unsigned long req,...){
  static int (*next)(int,unsigned long,...);static int once;if(!next)next=dlsym(RTLD_NEXT,"ioctl");
  va_list ap;va_start(ap,req);void *arg=va_arg(ap,void*);va_end(ap);int rc=next(fd,req,arg),saved=errno;
@@ -59,10 +62,14 @@ int ioctl(int fd,unsigned long req,...){
    sigset_t blocked,old;sigemptyset(&blocked);sigaddset(&blocked,SIGINT);sigaddset(&blocked,SIGTERM);sigaddset(&blocked,SIGHUP);
    if(sigprocmask(SIG_BLOCK,&blocked,&old)){fprintf(stderr,"GSP_SEMANTIC ERROR signal mask\n");goto done;}
    int result=run_power(next,fd,req,info,(unsigned)target,activate);
+   semanticSeen=1;semanticResult=result;
    fprintf(stderr,"GSP_SEMANTIC %s mode=%s target=%lu\n",result?"ERROR":"SUCCESS",mode,target);
    sigprocmask(SIG_SETMASK,&old,NULL);
   }
  }
 done:errno=saved;return rc;
 }
+int semantic_transaction_seen(void){return semanticSeen;}
+int semantic_transaction_result(void){return semanticResult;}
+const GSP_POWER_PROBE_PARAMS *semantic_transaction_last(void){return &semanticLast;}
 #endif

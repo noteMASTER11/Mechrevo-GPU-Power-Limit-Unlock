@@ -5,7 +5,7 @@ After=nvidia-powerd.service nvidia-persistenced.service uccd.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python /usr/local/lib/mechrevo-semantic-tgp/run_boot.py
+ExecStart=/usr/local/lib/mechrevo-semantic-tgp/mechrevo-semantic-tgp
 RemainAfterExit=yes
 Restart=no
 TimeoutStartSec=0

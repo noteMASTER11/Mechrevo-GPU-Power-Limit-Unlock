@@ -6,13 +6,13 @@ an experiment prepared for the verified MECHREVO RTX 5080 Laptop host. The
 existing v6 instructions remain the established path until this entry completes
 a clean live boot and load test.
 
-The first v8 live boot reached WPR2 successfully but the initial 256 KiB heap
-DMA was rejected with `NV_ERR_INVALID_ARGUMENT` before any write. Revision
-v8r2 negotiates the supported power-of-two transfer size from 64 KiB down to
-the already verified 4 KiB transport. Only an explicit invalid-argument result
-permits a smaller retry; every uncertain transfer error still poisons the boot
-epoch. The first attempt performed zero writes and left the stock 175 W maximum
-intact.
+The first two v8 live boots reached WPR2 but their 256 KiB and 64 KiB memory
+descriptors were rejected with `NV_ERR_INVALID_ARGUMENT` before any write. A
+smaller transfer length did not change the allocation descriptor. Revision
+v8r3 therefore uses the exact 4 KiB descriptor and transfer shape already
+verified by v5, and scans a bounded 8 MiB object arena page by page. Every
+transfer error still poisons the boot epoch. Both failed attempts performed
+zero writes and left the stock 175 W maximum intact.
 
 ## What v8 resolves
 
@@ -29,7 +29,7 @@ topology containing:
 5. a unique link from slot 2 to the board selector and cTGP tuple.
 
 The resulting three write destinations are discovered values. They are not
-provided by `query_power.so` or stored as driver-library offsets.
+provided by the user-space runner or stored as driver-library offsets.
 
 ## Boot transaction
 
@@ -47,13 +47,16 @@ Before selecting it:
    system profile, fans, and water-cooler controls;
 4. keep the ordinary CachyOS entry available.
 
-The boot service waits for GSP-RM and UCC, verifies that `nvidia-powerd` has
-yielded Dynamic Boost ownership, and runs operations `inspect`, `arm`,
-`ceilings`, and `direct set`. Console output includes green `[SUCCESS]` records
-for the unique resolution, verified ceiling writes, and the final 250 W NVML
-limit. A verified success remains on screen for five seconds. Any ambiguity,
-unexpected pre-state, transfer error, readback mismatch, active competing TGP
-request, or wrong module marker stops the transaction.
+The boot service runs one compiled C executable. It waits for GSP-RM and UCC,
+verifies that `nvidia-powerd` has yielded Dynamic Boost ownership, loads NVML,
+and runs operations `inspect`, `arm`, `ceilings`, and `direct set` through its
+in-process ioctl adapter. It requires no Python installation, virtual
+environment, `LD_PRELOAD`, or separate shared object. Console output includes
+green `[SUCCESS]` records for the unique resolution, verified ceiling writes,
+and the final 250 W NVML limit. A verified success remains on screen for five
+seconds. Any ambiguity, unexpected pre-state, transfer error, readback
+mismatch, active competing TGP request, or wrong module marker stops the
+transaction.
 
 After boot, collect the result with:
 
@@ -88,10 +91,10 @@ python scripts/build_semantic_v8.py
 ```
 
 The build script pins NVIDIA `615.71.09`, verifies the exact patch tree, builds
-all five NVIDIA kernel modules, builds the address-free preload client, checks
-the module marker, and writes `build/semantic-v8/build.json`. It does not copy
-modules into the running system, change the bootloader, load a module, or issue
-a power command.
+all five NVIDIA kernel modules, builds the standalone address-free C runner,
+checks the module marker, and writes `build/semantic-v8/build.json`. It does not
+copy modules into the running system, change the bootloader, load a module, or
+issue a power command.
 
 ## Remaining compatibility boundaries
 

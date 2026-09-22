@@ -12,7 +12,7 @@ from package_common import ROOT, NVIDIA_BASE, KERNEL
 
 PATCH = ROOT / "patches/nvidia-gsp-semantic-tgp-v8.patch"
 MODULES = ("nvidia", "nvidia-modeset", "nvidia-uvm", "nvidia-drm", "nvidia-peermem")
-MARKER = "semantic-tgp-v8r2-20260922"
+MARKER = "semantic-tgp-v8r3-20260922"
 
 
 def run(*args, cwd=None):
@@ -63,11 +63,13 @@ def main():
     run("make", f"-j{args.jobs}", "CC=clang", "LD=ld.lld", f"KERNEL_UNAME={KERNEL}", "modules", cwd=source)
     out = ROOT / "build/semantic-v8"
     out.mkdir(parents=True, exist_ok=True)
-    run("cc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra",
+    run("cc", "-O2", "-Wall", "-Wextra", "-Werror", "-rdynamic",
         "-I" + str(source / "src/common/sdk/nvidia/inc"),
         "-I" + str(source / "src/nvidia/arch/nvalloc/common/inc"),
         "-I" + str(source / "src/nvidia/interface"),
-        str(ROOT / "src/runtime/query_semantic_power.c"), "-ldl", "-o", str(out / "query_power.so"))
+        str(ROOT / "src/runtime/query_semantic_power.c"),
+        str(ROOT / "src/runtime/semantic_boot.c"),
+        "-ldl", "-lsystemd", "-o", str(out / "mechrevo-semantic-tgp"))
     marker = subprocess.check_output(
         ["modinfo", "-F", "gsp_read_probe", str(source / "kernel-open/nvidia.ko")], text=True
     ).strip()
@@ -81,7 +83,7 @@ def main():
         "source": str(source / "kernel-open"),
         "patch_sha256": sha(PATCH),
         "module_hashes": {name + ".ko": sha(source / "kernel-open" / (name + ".ko")) for name in MODULES},
-        "client_sha256": sha(out / "query_power.so"),
+        "runner_sha256": sha(out / "mechrevo-semantic-tgp"),
     }
     (out / "build.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))

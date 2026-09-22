@@ -10,11 +10,12 @@
   NVIDIA 615.71.09 source to the current owner adapter and resolver.
 - `scripts/build_semantic_v8.py`: applies the exact patch to a clean pinned
   tree and builds without installing or loading anything.
-- `src/runtime/query_semantic_power.c`: preload client whose request contains
+- `src/runtime/query_semantic_power.c`: ioctl adapter whose request contains
   only operation and target; it sends no protected-memory address or offset.
-- `src/runtime/run_semantic_boot.py`: boot helper that verifies UCC Max TGP,
-  runs the semantic transaction, checks NVML readback, and reports progress on
-  the console.
+- `src/runtime/semantic_boot.c`: standalone C boot runner. It verifies UCC Max
+  TGP, loads NVML, runs the semantic transaction through the linked ioctl
+  adapter, checks readback, and reports progress on the console. It does not
+  require Python, a virtual environment, or a separate preload library.
 - `src/runtime/mechrevo-semantic-tgp.service` and
   `src/runtime/nvidia-powerd-semantic-tgp.conf`: isolated boot service and
   Dynamic Boost ownership condition. UCC remains enabled.
