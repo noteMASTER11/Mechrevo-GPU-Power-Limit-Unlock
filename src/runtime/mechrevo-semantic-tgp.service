@@ -1,7 +1,7 @@
 [Unit]
-Description=Mechrevo semantic GSP TGP resolver
-ConditionKernelCommandLine=codex.semantic_tgp=250-v8r6
-After=nvidia-powerd.service nvidia-persistenced.service uccd.service
+Description=Semantic NVIDIA GSP TGP resolver V11
+ConditionKernelCommandLine=codex.semantic_tgp=250-v11
+After=nvidia-persistenced.service uccd.service
 
 [Service]
 Type=oneshot

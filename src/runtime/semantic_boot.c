@@ -17,8 +17,8 @@
 #include "nvtypes.h"
 #include "deprecated/gsp_power_probe.h"
 
-#define TOKEN "codex.semantic_tgp=250-v8r6"
-#define MARKER "semantic-tgp-v8r6-20260922"
+#define TOKEN "codex.semantic_tgp=250-v11"
+#define MARKER "semantic-tgp-v11-20260922"
 #define TARGET_MW 250000U
 #define GREEN "\033[1;32m"
 #define RED "\033[1;31m"
@@ -161,7 +161,12 @@ static int run_nvml(unsigned *current,unsigned *maximum,char *name,size_t nameSi
      * ioctl interposer performs the fixed semantic transaction exactly once. */
     (void)constraints(device,&minimum,maximum);(void)limit(device,current);(void)power(device,&usage);
     if(!semantic_transaction_seen()||semantic_transaction_result())goto shutdown_done;
-    if(constraints(device,&minimum,maximum)!=0||limit(device,current)!=0)goto shutdown_done;
+    /* Mobile NVML may continue to report NVML_ERROR_NOT_SUPPORTED for the
+     * public CURRENT accessor.  The transaction's second semantic resolution
+     * is the authoritative readback for this GSP-internal contract. */
+    (void)constraints(device,&minimum,maximum);(void)limit(device,current);
+    *current=semantic_transaction_last()->currentBaseMw;
+    *maximum=semantic_transaction_last()->currentUpperMw;
     r=0;
 shutdown_done:shutdown();
 done:dlclose(lib);return r;
@@ -185,9 +190,16 @@ int main(void)
     line("[....]","Resolving the live GSP policy arena with the verified 4 KiB transport");
     setenv("CODEX_GSP_POWER_MODE","activate",1);setenv("CODEX_GSP_TARGET_MW","250000",1);
     if(run_nvml(&current,&maximum,name,sizeof(name))){finish_record("failed","semantic transaction failed",current,maximum);line("[FAILED]","semantic transaction failed");return 1;}
-    if(current!=TARGET_MW||maximum!=TARGET_MW){finish_record("failed","NVML readback mismatch",current,maximum);line("[FAILED]","NVML readback mismatch");return 1;}
-    if(!semantic_transaction_last()->armed||semantic_transaction_last()->active||semantic_transaction_last()->writes!=3){finish_record("failed","driver state mismatch",current,maximum);line("[FAILED]","driver state mismatch");return 1;}
+    if(current!=225000U||maximum!=TARGET_MW){finish_record("failed","semantic readback mismatch",current,maximum);line("[FAILED]","semantic readback mismatch");return 1;}
+    if(!semantic_transaction_last()->armed||!semantic_transaction_last()->active||
+       semantic_transaction_last()->writes!=16||semantic_transaction_last()->rollbackWrites||
+       semantic_transaction_last()->currentBaseMw!=225000U||
+       semantic_transaction_last()->currentEntry13!=250000U||
+       semantic_transaction_last()->currentEntry14!=100000U||
+       semantic_transaction_last()->currentCurrentMw!=225000U||
+       !semantic_transaction_last()->ctgpActive||
+       semantic_transaction_last()->ctgpOffsetMw!=semantic_transaction_last()->currentBaseMw-semantic_transaction_last()->stockCurrentMw){finish_record("failed","driver state mismatch",current,maximum);line("[FAILED]","driver state mismatch");return 1;}
     snprintf(message,sizeof(message),"%s exposes a verified %u W limit",name,current/1000);line("[SUCCESS]",message);
-    finish_record("verified_250w",NULL,current,maximum);line("[SUCCESS]","Semantic ceilings and the base TGP policy are verified; Dynamic Boost remains disabled");
+    finish_record("verified_base_225w",NULL,current,maximum);line("[SUCCESS]","Base and CURRENT are 225 W; total ceiling 250 W and NVVDD/MSVDD envelopes are verified; Dynamic Boost remains disabled");
     line("[....]","Holding the success screen for 5 seconds");sleep(5);return 0;
 }

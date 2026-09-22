@@ -1,0 +1,1106 @@
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index df5a5e0..1f400a5 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -119,6 +119,9 @@
+ MODULE_LICENSE("Dual MIT/GPL");
+ 
+ MODULE_INFO(supported, "external");
++MODULE_INFO(gsp_read_probe, "semantic-tgp-v11-20260922");
++static char *gsp_read_probe_build = "semantic-tgp-v11-20260922";
++module_param_named(GspReadProbeBuild, gsp_read_probe_build, charp, 0444);
+ MODULE_VERSION(NV_VERSION_STRING);
+ MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
+ MODULE_ALIAS_CHARDEV_MAJOR(NV_MAJOR_DEVICE_NUMBER);
+diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.h b/src/nvidia/interface/deprecated/gsp_power_probe.h
+new file mode 100644
+index 0000000..a53f3c2
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_power_probe.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: MIT. Semantic direct-TGP research ABI. */
++#ifndef CODEX_GSP_POWER_PROBE_H
++#define CODEX_GSP_POWER_PROBE_H
++#define GSP_POWER_PROBE_CMD 0x2080ff72U
++#define GSP_POWER_PROBE_VERSION 11U
++#define GSP_POWER_TARGET_MIN_MW 200000U
++#define GSP_POWER_TARGET_MAX_MW 300000U
++#define GSP_POWER_RAIL_WRITERS 6U
++typedef struct {
++ NvU32 version,operation,targetMw,reserved;
++ NvU32 stage,result,armed,active,poisoned,writes;
++ NvU32 resolverStatus,transferCalls,stockUpperMw,currentUpperMw;
++ NvU64 heapSource,heapSize,vaBase,policyArray,boardObject;
++ NvU64 maxEffectiveMember,maxSourceMember,pmgrUpperMember;
++ NvU64 baseInternalMember,entry13Object,entry14Object;
++ NvU64 entry13Writers[GSP_POWER_RAIL_WRITERS],entry14Writers[GSP_POWER_RAIL_WRITERS];
++ NvU32 stockBaseMw,currentBaseMw,stockEntry13,currentEntry13;
++ NvU32 stockEntry14,currentEntry14,rollbackWrites,reservedOut;
++ NvU64 currentSelector,currentMember;
++ NvU32 stockCurrentMw,currentCurrentMw,ctgpOffsetMw,ctgpActive;
++ NvU32 postActivationResolverStatus,currentRecordWords[5];
++ NvU32 reservedDiag[2];
++} GSP_POWER_PROBE_PARAMS;
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_power_probe.inc b/src/nvidia/interface/deprecated/gsp_power_probe.inc
+new file mode 100644
+index 0000000..7594cf4
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_power_probe.inc
+@@ -0,0 +1,425 @@
++/* SPDX-License-Identifier: MIT
++ * Semantic, fail-closed GSP power resolver and writer.  Root/API/GPU locks are
++ * held by the dispatcher.  Userspace supplies an operation and target only.
++ */
++#include "deprecated/gsp_semantic_adapter.inc"
++
++#define GSP_SEMANTIC_CACHE_SIZE 4096U
++#define GSP_SEMANTIC_SCAN_LIMIT (8ULL * 1024ULL * 1024ULL)
++#define GSP_SEMANTIC_MAX_CALLS 32768U
++#define GSP_SEMANTIC_WPR_PREFIX 0x4000ULL /* Blackwell ACR WPR/LSB header ABI */
++
++typedef struct {
++ OBJGPU *gpu;
++ NvU64 source,size,cacheBase;
++ NvU32 cacheBytes;
++ NvBool cacheValid;
++ MEMORY_DESCRIPTOR *desc;
++ void *map,*priv;
++ NvU8 *snapshot;
++ NvU32 snapshotBytes;
++ NV_STATUS lastStatus;
++} GSP_SEMANTIC_CONTEXT;
++
++typedef struct {
++ NvU32 armed,active,poisoned,writes,rollbackWrites,target,ctgpActive,ctgpOffsetMw;
++ struct gs_resolution resolution;
++} GSP_SEMANTIC_STATE;
++
++static GSP_SEMANTIC_STATE gspSemanticState;
++
++static NV_STATUS gspSemanticContextInit(OBJGPU *g,GSP_SEMANTIC_CONTEXT *c)
++{
++ KernelGsp *kgsp=GPU_GET_KERNEL_GSP(g);NV_RANGE wpr[2]={NV_RANGE_EMPTY,NV_RANGE_EMPTY};
++ NvU64 heapSize=0,start,end;NV_STATUS st;
++ if(IS_VIRTUAL(g)||gpuIsCCFeatureEnabled(g)||kgsp==NULL)return NV_ERR_NOT_SUPPORTED;
++ if(kgsp->pWprMetaHopper!=NULL){
++  GspFwWprMeta *m=kgsp->pWprMetaHopper;
++  if(m->magic!=GSP_FW_WPR_META_MAGIC)return NV_ERR_INVALID_DATA;heapSize=m->gspFwHeapSize;
++ }else if(kgsp->pWprMetaV1!=NULL){
++  GspFwWprMetaV1 *m=kgsp->pWprMetaV1;
++  if(m->magic!=GSP_FW_WPR_META_MAGIC)return NV_ERR_INVALID_DATA;heapSize=m->gspFwHeapSize;
++ }else return NV_ERR_NOT_SUPPORTED;
++ kbusCarveoutWprs_HAL(g,GPU_GET_KERNEL_BUS(g),wpr);
++ if(wpr[1].hi<wpr[1].lo||wpr[1].hi==~(NvU64)0)return NV_ERR_INVALID_DATA;
++ start=wpr[1].lo;end=wpr[1].hi+1;
++ if(start>end-GSP_SEMANTIC_WPR_PREFIX)return NV_ERR_INVALID_DATA;
++ c->source=start+GSP_SEMANTIC_WPR_PREFIX;
++ if(heapSize<0x10000ULL||heapSize>GS_HEAP_LIMIT||heapSize>end-c->source)return NV_ERR_INVALID_DATA;
++ c->gpu=g;c->size=heapSize;c->cacheBase=0;c->cacheBytes=0;c->cacheValid=NV_FALSE;c->lastStatus=NV_OK;
++ st=memdescCreate(&c->desc,g,GSP_SEMANTIC_CACHE_SIZE,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
++ if(st!=NV_OK)return st;st=memdescAlloc(c->desc);if(st!=NV_OK){memdescDestroy(c->desc);c->desc=NULL;return st;}
++ st=memdescMapOld(c->desc,0,GSP_SEMANTIC_CACHE_SIZE,NV_TRUE,NV_PROTECT_READ_WRITE,&c->map,&c->priv);
++ if(st!=NV_OK){memdescFree(c->desc);memdescDestroy(c->desc);c->desc=NULL;}
++ return st;
++}
++
++static void gspSemanticContextDestroy(GSP_SEMANTIC_CONTEXT *c)
++{
++ if(c->map!=NULL)memdescUnmapOld(c->desc,NV_TRUE,c->map,c->priv);
++ if(c->desc!=NULL){memdescFree(c->desc);memdescDestroy(c->desc);}
++ if(c->snapshot!=NULL)portMemFree(c->snapshot);
++ c->map=NULL;c->desc=NULL;c->priv=NULL;c->snapshot=NULL;c->snapshotBytes=0;
++}
++
++static NV_STATUS gspSemanticFill(GSP_SEMANTIC_CONTEXT *c,NvU64 offset)
++{
++ NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS x={0};
++ RM_API *api=GPU_GET_PHYSICAL_RMAPI(c->gpu);NvU64 pa,base=offset&~4095ULL;NV_STATUS st;
++ if(gspProbe_poisoned||gspProbe_callsUsed>=GSP_SEMANTIC_MAX_CALLS)return NV_ERR_INVALID_STATE;
++ pa=memdescGetPhysAddr(c->desc,AT_GPU,0);
++ if(!pa||(pa&4095))return NV_ERR_INVALID_DATA;
++ portMemSet(c->map,0,GSP_SEMANTIC_CACHE_SIZE);
++ x.src.baseAddr=c->source+base;x.src.size=4096;x.src.aperture=2;x.src.cpuCacheAttrib=0;
++ x.dst.baseAddr=pa;x.dst.size=4096;x.dst.aperture=1;x.dst.cpuCacheAttrib=0;
++ x.transferSize=4096;x.memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ ++gspProbe_callsUsed;
++ st=api->Control(api,c->gpu->hInternalClient,c->gpu->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&x,sizeof(x));
++ if(st!=NV_OK){
++  gspProbe_poisoned=NV_TRUE;c->lastStatus=st;
++  gspProbe_retainedDesc=c->desc;gspProbe_retainedMap=c->map;gspProbe_retainedPriv=c->priv;
++  c->desc=NULL;c->map=NULL;c->priv=NULL;return st;
++ }
++ c->cacheBase=base;c->cacheBytes=4096;c->cacheValid=NV_TRUE;return NV_OK;
++}
++
++static NV_STATUS gspSemanticReadNv(GSP_SEMANTIC_CONTEXT *c,NvU64 offset,void *dest,NvU32 size)
++{
++ NvU32 done=0;NV_STATUS st;
++ if(size>c->size||offset>c->size-size)return NV_ERR_INVALID_ARGUMENT;
++ while(done<size){NvU64 at=offset+done;NvU32 within,n;
++  if(!c->cacheValid||at<c->cacheBase||at>=c->cacheBase+c->cacheBytes){st=gspSemanticFill(c,at);if(st!=NV_OK)return st;}
++  within=(NvU32)(at-c->cacheBase);n=c->cacheBytes-within;if(n>size-done)n=size-done;
++  portMemCopy((NvU8*)dest+done,size-done,(NvU8*)c->map+within,n);done+=n;
++ }
++ return NV_OK;
++}
++
++static int gspSemanticCoreRead(void *opaque,NvU64 offset,void *dest,NvU32 size)
++{
++ GSP_SEMANTIC_CONTEXT *c=opaque;
++ if(size>c->snapshotBytes||offset>c->snapshotBytes-size)return 1;
++ portMemCopy(dest,size,c->snapshot+offset,size);return 0;
++}
++
++static NV_STATUS gspSemanticSnapshot(GSP_SEMANTIC_CONTEXT *c,NvU32 bytes)
++{
++ NV_STATUS st;NvU32 offset,n;
++ if(c->snapshot!=NULL){portMemFree(c->snapshot);c->snapshot=NULL;c->snapshotBytes=0;}
++ c->snapshot=portMemAllocNonPaged(bytes);if(c->snapshot==NULL)return NV_ERR_NO_MEMORY;
++ for(offset=0;offset<bytes;offset+=4096){
++  st=gspSemanticFill(c,offset);if(st!=NV_OK)return st;
++  n=bytes-offset;if(n>4096)n=4096;
++  portMemCopy(c->snapshot+offset,bytes-offset,c->map,n);
++ }
++ c->snapshotBytes=bytes;return NV_OK;
++}
++
++static NV_STATUS gspSemanticResolve(GSP_SEMANTIC_CONTEXT *c,struct gs_resolution *r,NvU32 *resolverStatus)
++{
++ NvU32 scanSize=(NvU32)(c->size>GSP_SEMANTIC_SCAN_LIMIT?GSP_SEMANTIC_SCAN_LIMIT:c->size);int rc;NV_STATUS st;
++ struct gs_io io={c,gspSemanticCoreRead,scanSize};
++ st=gspSemanticSnapshot(c,scanSize);if(st!=NV_OK){*resolverStatus=GS_IO;return st;}
++ rc=gs_resolve_autonomous(&io,r);
++ *resolverStatus=(NvU32)rc;
++ if(rc==GS_OK)return NV_OK;if(rc==GS_IO&&c->lastStatus!=NV_OK)return c->lastStatus;
++ return rc==GS_AMBIGUOUS?NV_ERR_INVALID_STATE:NV_ERR_INVALID_DATA;
++}
++
++static NV_STATUS gspSemanticReadU32(GSP_SEMANTIC_CONTEXT *c,NvU64 offset,NvU32 *value)
++{ return gspSemanticReadNv(c,offset,value,4); }
++
++static NvBool gspSemanticWriterAllowed(NvU64 offset)
++{
++ NvU32 i;const struct gs_resolution *r=&gspSemanticState.resolution;
++ if(offset==r->board_max_effective||offset==r->board_max_source||offset==r->pmgr_upper||
++    offset==r->base_internal)return NV_TRUE;
++ for(i=0;i<GS_RAIL_WRITERS;i++)if(offset==r->entry13_writers[i]||offset==r->entry14_writers[i])return NV_TRUE;
++ return NV_FALSE;
++}
++
++static NV_STATUS gspSemanticWriteU32(GSP_SEMANTIC_CONTEXT *c,NvU64 offset,NvU32 expected,NvU32 value,NvBool rollback)
++{
++ OBJGPU *g=c->gpu;MEMORY_DESCRIPTOR *desc=NULL;void *map=NULL,*priv=NULL;NV_STATUS st;NvU32 actual;
++ NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS x={0};RM_API *api=GPU_GET_PHYSICAL_RMAPI(g);NvU64 pa;
++ if(!gspSemanticWriterAllowed(offset))return NV_ERR_INVALID_ARGUMENT;
++ st=gspSemanticReadU32(c,offset,&actual);if(st!=NV_OK)return st;if(actual!=expected)return NV_ERR_INVALID_STATE;
++ st=memdescCreate(&desc,g,4096,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);if(st!=NV_OK)return st;
++ st=memdescAlloc(desc);if(st!=NV_OK)goto cleanup;
++ st=memdescMapOld(desc,0,4096,NV_TRUE,NV_PROTECT_READ_WRITE,&map,&priv);if(st!=NV_OK)goto cleanup;
++ portMemSet(map,0,4096);portMemCopy(map,4096,&value,4);pa=memdescGetPhysAddr(desc,AT_GPU,0);
++ if(!pa||(pa&4095)){st=NV_ERR_INVALID_DATA;goto cleanup;}
++ x.src.baseAddr=pa;x.src.size=4096;x.src.aperture=1;x.src.cpuCacheAttrib=0;
++ x.dst.baseAddr=c->source+(offset&~4095ULL);x.dst.size=4096;x.dst.offset=offset&4095;
++ x.dst.aperture=2;x.dst.cpuCacheAttrib=0;x.transferSize=4;x.memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ ++gspProbe_callsUsed;if(rollback)++gspSemanticState.rollbackWrites;else ++gspSemanticState.writes;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&x,sizeof(x));
++ if(st!=NV_OK){
++  gspProbe_poisoned=NV_TRUE;gspSemanticState.poisoned=1;
++  gspProbe_retainedDesc=desc;gspProbe_retainedMap=map;gspProbe_retainedPriv=priv;
++  desc=NULL;map=NULL;priv=NULL;goto cleanup;
++ }
++ c->cacheValid=NV_FALSE;st=gspSemanticReadU32(c,offset,&actual);
++ if(st!=NV_OK||actual!=value){if(st==NV_OK)st=NV_ERR_INVALID_STATE;gspSemanticState.poisoned=1;}
++cleanup:
++ if(map!=NULL)memdescUnmapOld(desc,NV_TRUE,map,priv);if(desc!=NULL){memdescFree(desc);memdescDestroy(desc);}return st;
++}
++
++static NvBool gspSemanticSame(const struct gs_resolution *a,const struct gs_resolution *b)
++{
++ NvU32 i;
++ for(i=0;i<GS_RAIL_WRITERS;i++)if(a->entry13_writers[i]!=b->entry13_writers[i]||
++                                    a->entry14_writers[i]!=b->entry14_writers[i])return NV_FALSE;
++ return a->va_base==b->va_base&&a->policy_array==b->policy_array&&a->board_object==b->board_object&&
++  a->selector==b->selector&&a->ctgp_tuple==b->ctgp_tuple&&
++  a->board_max_effective==b->board_max_effective&&a->board_max_source==b->board_max_source&&
++  a->pmgr_upper==b->pmgr_upper&&a->base_internal==b->base_internal&&
++  a->entry13_object==b->entry13_object&&a->entry14_object==b->entry14_object&&
++  a->current_selector==b->current_selector&&a->current_member==b->current_member;
++}
++
++static void gspSemanticOutput(GSP_POWER_PROBE_PARAMS *p,GSP_SEMANTIC_CONTEXT *c,const struct gs_resolution *r)
++{
++ p->armed=gspSemanticState.armed;p->active=gspSemanticState.active;p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;
++ p->writes=gspSemanticState.writes;p->transferCalls=gspProbe_callsUsed;p->heapSource=c->source;p->heapSize=c->size;
++ p->vaBase=r->va_base;p->policyArray=r->policy_array;p->boardObject=r->board_object;
++ p->maxEffectiveMember=r->board_max_effective;p->maxSourceMember=r->board_max_source;p->pmgrUpperMember=r->pmgr_upper;
++ p->stockUpperMw=r->stock_upper_mw;p->currentUpperMw=r->current_upper_mw;
++ p->baseInternalMember=r->base_internal;p->entry13Object=r->entry13_object;p->entry14Object=r->entry14_object;
++ portMemCopy(p->entry13Writers,sizeof(p->entry13Writers),r->entry13_writers,sizeof(r->entry13_writers));
++ portMemCopy(p->entry14Writers,sizeof(p->entry14Writers),r->entry14_writers,sizeof(r->entry14_writers));
++ p->stockBaseMw=r->stock_base_mw;p->currentBaseMw=r->current_base_mw;
++ p->stockEntry13=r->stock_entry13;p->currentEntry13=r->current_entry13;
++ p->stockEntry14=r->stock_entry14;p->currentEntry14=r->current_entry14;
++ p->rollbackWrites=gspSemanticState.rollbackWrites;
++ p->currentSelector=r->current_selector;p->currentMember=r->current_member;
++ p->stockCurrentMw=r->stock_current_mw;p->currentCurrentMw=r->current_current_mw;
++ p->ctgpOffsetMw=gspSemanticState.ctgpOffsetMw;p->ctgpActive=gspSemanticState.ctgpActive;
++}
++
++#define GSP_SEMANTIC_TRANSACTION_WRITES 16U
++typedef struct { NvU64 offset;NvU32 before,after; } GSP_SEMANTIC_WRITE;
++
++static NV_STATUS gspSemanticBuildPlan(const struct gs_resolution *r,NvU32 target,
++                                      GSP_SEMANTIC_WRITE plan[GSP_SEMANTIC_TRANSACTION_WRITES])
++{
++ NvU32 n=0,i;
++ if(target!=250000U||r->stock_upper_mw!=175000U||r->stock_base_mw!=BASE_STOCK_MW||
++    r->stock_entry13!=ENTRY13_STOCK||r->stock_entry14!=ENTRY14_STOCK)return NV_ERR_NOT_SUPPORTED;
++ /* Raise the two rail envelopes before the aggregate/base request. */
++ for(i=0;i<GS_RAIL_WRITERS;i++)plan[n++]=(GSP_SEMANTIC_WRITE){r->entry13_writers[i],ENTRY13_STOCK,ENTRY13_TARGET};
++ for(i=0;i<GS_RAIL_WRITERS;i++)plan[n++]=(GSP_SEMANTIC_WRITE){r->entry14_writers[i],ENTRY14_STOCK,ENTRY14_TARGET};
++ plan[n++]=(GSP_SEMANTIC_WRITE){r->board_max_source,r->stock_upper_mw,target};
++ plan[n++]=(GSP_SEMANTIC_WRITE){r->board_max_effective,r->stock_upper_mw,target};
++ plan[n++]=(GSP_SEMANTIC_WRITE){r->pmgr_upper,r->stock_upper_mw,target};
++ plan[n++]=(GSP_SEMANTIC_WRITE){r->base_internal,BASE_STOCK_MW,BASE_TARGET_MW};
++ return n==GSP_SEMANTIC_TRANSACTION_WRITES?NV_OK:NV_ERR_INVALID_STATE;
++}
++
++static NV_STATUS gspSemanticApplyPlan(GSP_SEMANTIC_CONTEXT *c,
++                                      GSP_SEMANTIC_WRITE plan[GSP_SEMANTIC_TRANSACTION_WRITES])
++{
++ NvU32 i,done=0;NV_STATUS st=NV_OK,restore;
++ for(i=0;i<GSP_SEMANTIC_TRANSACTION_WRITES;i++){
++  st=gspSemanticWriteU32(c,plan[i].offset,plan[i].before,plan[i].after,NV_FALSE);
++  if(st!=NV_OK)break;done++;
++ }
++ if(st==NV_OK)return NV_OK;
++ while(done){done--;restore=gspSemanticWriteU32(c,plan[done].offset,plan[done].after,plan[done].before,NV_TRUE);
++  if(restore!=NV_OK)gspSemanticState.poisoned=1;}
++ if(i>0)gspSemanticState.poisoned=1;
++ return st;
++}
++
++static NV_STATUS gspSemanticVerifyAppliedPlan(GSP_SEMANTIC_CONTEXT *c,
++                                               GSP_SEMANTIC_WRITE plan[GSP_SEMANTIC_TRANSACTION_WRITES])
++{
++ NvU32 i,actual;NV_STATUS st;
++ for(i=0;i<GSP_SEMANTIC_TRANSACTION_WRITES;i++){
++  st=gspSemanticReadU32(c,plan[i].offset,&actual);
++  if(st!=NV_OK)return st;
++  if(actual!=plan[i].after)return NV_ERR_INVALID_STATE;
++ }
++ return NV_OK;
++}
++
++static NV_STATUS gspSemanticRollbackPlan(GSP_SEMANTIC_CONTEXT *c,
++                                         GSP_SEMANTIC_WRITE plan[GSP_SEMANTIC_TRANSACTION_WRITES],
++                                         NvU32 completed)
++{
++ NvBool failed=NV_FALSE;NV_STATUS st;
++ while(completed){completed--;
++  st=gspSemanticWriteU32(c,plan[completed].offset,plan[completed].after,
++                         plan[completed].before,NV_TRUE);
++  if(st!=NV_OK)failed=NV_TRUE;
++ }
++ gspSemanticState.poisoned=1;
++ return failed?NV_ERR_INVALID_STATE:NV_OK;
++}
++
++static NV_STATUS gspSemanticReadCtgpState(GSP_SEMANTIC_CONTEXT *c,
++                                          const struct gs_resolution *r,
++                                          NvU8 flags[4],NvU32 *offset,NvU32 *current)
++{
++ NV_STATUS st;
++ if(r->ctgp_tuple<12)return NV_ERR_INVALID_DATA;
++ st=gspSemanticReadNv(c,r->ctgp_tuple-12,flags,4);
++ if(st==NV_OK)st=gspSemanticReadU32(c,r->ctgp_tuple-4,offset);
++ if(st==NV_OK)st=gspSemanticReadU32(c,r->current_member,current);
++ return st;
++}
++
++static NV_STATUS gspSemanticReleaseCtgp(GSP_SEMANTIC_CONTEXT *c,
++                                        const struct gs_resolution *r)
++{
++ OBJGPU *g=c->gpu;RM_API *api=GPU_GET_PHYSICAL_RMAPI(g);NV_STATUS st;
++ NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TURBO_V2_PARAMS offset={0};
++ NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TGP_MODE_PARAMS mode={0};
++ NvU8 flags[4]={0};NvU32 observedOffset=0,current=0;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TURBO_V2,
++                 &offset,sizeof(offset));
++ if(st!=NV_OK)return st;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TGP_MODE,
++                 &mode,sizeof(mode));
++ if(st!=NV_OK)return st;
++ c->cacheValid=NV_FALSE;
++ st=gspSemanticReadCtgpState(c,r,flags,&observedOffset,&current);
++ if(st!=NV_OK)return st;
++ if(flags[1]||observedOffset||current>r->stock_upper_mw)return NV_ERR_INVALID_STATE;
++ gspSemanticState.ctgpActive=0;gspSemanticState.ctgpOffsetMw=0;
++ return NV_OK;
++}
++
++static NV_STATUS gspSemanticActivateCtgp(GSP_SEMANTIC_CONTEXT *c,
++                                         const struct gs_resolution *r,
++                                         NvBool *safeToRollback)
++{
++ OBJGPU *g=c->gpu;RM_API *api=GPU_GET_PHYSICAL_RMAPI(g);NV_STATUS st,releaseStatus;
++ NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TURBO_V2_PARAMS offset={0};
++ NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TGP_MODE_PARAMS mode={0};
++ NvU8 flags[4]={0};NvU32 observedOffset=0,current=0;
++ *safeToRollback=NV_TRUE;
++ st=gspSemanticReadCtgpState(c,r,flags,&observedOffset,&current);if(st!=NV_OK)return st;
++ if(flags[0]!=1||flags[1]||flags[2]||observedOffset||
++    current!=r->stock_current_mw||r->current_upper_mw!=250000U||
++    r->current_base_mw!=BASE_TARGET_MW||r->stock_current_mw>=BASE_TARGET_MW)
++  return NV_ERR_INVALID_STATE;
++ offset.ctgpOffsetmW=BASE_TARGET_MW-r->stock_current_mw;
++ mode.bEnable=NV_TRUE;
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TURBO_V2,
++                 &offset,sizeof(offset));
++ if(st!=NV_OK){*safeToRollback=NV_FALSE;goto uncertain;}
++ c->cacheValid=NV_FALSE;
++ st=gspSemanticReadCtgpState(c,r,flags,&observedOffset,&current);
++ if(st!=NV_OK||flags[2]!=1||observedOffset!=offset.ctgpOffsetmW){
++  if(st==NV_OK)st=NV_ERR_INVALID_STATE;
++  goto release;
++ }
++ st=api->Control(api,g->hInternalClient,g->hInternalSubdevice,
++                 NV2080_CTRL_CMD_INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TGP_MODE,
++                 &mode,sizeof(mode));
++ if(st!=NV_OK)goto release;
++ c->cacheValid=NV_FALSE;
++ st=gspSemanticReadCtgpState(c,r,flags,&observedOffset,&current);
++ if(st!=NV_OK||flags[1]!=1||flags[2]!=1||observedOffset!=offset.ctgpOffsetmW||
++    current!=BASE_TARGET_MW){if(st==NV_OK)st=NV_ERR_INVALID_STATE;goto release;}
++ gspSemanticState.ctgpActive=1;gspSemanticState.ctgpOffsetMw=offset.ctgpOffsetmW;
++ return NV_OK;
++release:
++ releaseStatus=gspSemanticReleaseCtgp(c,r);
++ *safeToRollback=releaseStatus==NV_OK;
++uncertain:
++ gspSemanticState.poisoned=1;
++ return st;
++}
++
++static NV_STATUS gspPowerProbe(OBJGPU *g,GSP_POWER_PROBE_PARAMS *p,NvU32 size)
++{
++ GSP_SEMANTIC_CONTEXT c={0};struct gs_resolution r={0},after={0},activated={0};
++ GSP_SEMANTIC_WRITE plan[GSP_SEMANTIC_TRANSACTION_WRITES];NV_STATUS st,releaseStatus;
++ NvU32 operation,target;NvBool safeToRollback=NV_FALSE;
++ if(size!=sizeof(*p)||p->version!=GSP_POWER_PROBE_VERSION||p->reserved||
++    (p->operation!=0&&p->operation!=1&&p->operation!=2)||
++    p->targetMw!=250000U)
++  return NV_ERR_INVALID_ARGUMENT;
++ operation=p->operation;target=p->targetMw;portMemSet((NvU8*)p+16,0,sizeof(*p)-16);p->stage=1;
++ if(gspSemanticState.poisoned||gspProbe_poisoned){st=NV_ERR_INVALID_STATE;goto output_no_context;}
++ st=gspSemanticContextInit(g,&c);if(st!=NV_OK)goto output_no_context;
++ p->stage=10;st=gspSemanticResolve(&c,&r,&p->resolverStatus);if(st!=NV_OK)goto output;
++ gspSemanticOutput(p,&c,&r);
++ if(operation==0){p->stage=100;goto output;}
++ if((gspSemanticState.armed||gspSemanticState.active)&&
++    (!gspSemanticSame(&gspSemanticState.resolution,&r)||gspSemanticState.target!=target)){st=NV_ERR_INVALID_STATE;goto output;}
++ if(operation==1){
++  if(gspSemanticState.armed||r.current_upper_mw!=r.stock_upper_mw||
++     r.current_base_mw!=BASE_STOCK_MW||r.current_entry13!=ENTRY13_STOCK||
++     r.current_entry14!=ENTRY14_STOCK||r.current_current_mw!=r.stock_current_mw){st=NV_ERR_INVALID_STATE;goto output;}
++  st=gspSemanticBuildPlan(&r,target,plan);if(st!=NV_OK)goto output;
++  gspSemanticState.armed=1;gspSemanticState.target=target;gspSemanticState.resolution=r;p->stage=100;goto output;
++ }
++ if(operation==2){
++  if(!gspSemanticState.armed||gspSemanticState.active||r.current_upper_mw!=r.stock_upper_mw||
++     r.current_base_mw!=BASE_STOCK_MW||r.current_entry13!=ENTRY13_STOCK||
++     r.current_entry14!=ENTRY14_STOCK||r.current_current_mw!=r.stock_current_mw){st=NV_ERR_INVALID_STATE;goto output;}
++  st=gspSemanticBuildPlan(&r,target,plan);if(st!=NV_OK)goto output;
++  p->stage=21;st=gspSemanticApplyPlan(&c,plan);if(st!=NV_OK)goto output;
++  c.cacheValid=NV_FALSE;p->stage=24;st=gspSemanticResolve(&c,&after,&p->resolverStatus);
++  if(st!=NV_OK||!gspSemanticSame(&r,&after)||after.current_upper_mw!=target||
++     after.current_base_mw!=BASE_TARGET_MW||after.current_entry13!=ENTRY13_TARGET||
++     after.current_entry14!=ENTRY14_TARGET||after.current_current_mw!=after.stock_current_mw){
++   NV_STATUS verifyStatus=st==NV_OK?NV_ERR_INVALID_STATE:st;
++   p->stage=25;c.cacheValid=NV_FALSE;
++   (void)gspSemanticRollbackPlan(&c,plan,GSP_SEMANTIC_TRANSACTION_WRITES);
++   st=verifyStatus;goto output;
++  }
++  p->stage=30;st=gspSemanticActivateCtgp(&c,&after,&safeToRollback);
++  if(st!=NV_OK){if(safeToRollback)(void)gspSemanticRollbackPlan(&c,plan,GSP_SEMANTIC_TRANSACTION_WRITES);r=after;goto output;}
++  c.cacheValid=NV_FALSE;p->stage=34;st=gspSemanticVerifyAppliedPlan(&c,plan);
++  if(st==NV_OK)st=gspSemanticReadNv(&c,after.current_selector,p->currentRecordWords,
++                                    sizeof(p->currentRecordWords));
++  if(st!=NV_OK){
++   NV_STATUS verifyStatus=st;
++   releaseStatus=gspSemanticReleaseCtgp(&c,&after);
++   if(releaseStatus==NV_OK)(void)gspSemanticRollbackPlan(&c,plan,GSP_SEMANTIC_TRANSACTION_WRITES);
++   else gspSemanticState.poisoned=1;
++   st=verifyStatus;r=after;goto output;
++  }
++  /* The cTGP API rewrites its CURRENT selector record.  The pre-write
++   * autonomous resolution remains authoritative for addresses; verify every
++   * resolved writer directly, then attempt a second autonomous resolution to
++   * characterize the active record without treating a shape change as a
++   * failed hardware transaction. */
++  c.cacheValid=NV_FALSE;p->stage=35;
++  st=gspSemanticResolve(&c,&activated,&p->postActivationResolverStatus);
++  if(st==NV_OK){
++   if(!gspSemanticSame(&after,&activated)||activated.current_upper_mw!=target||
++      activated.current_base_mw!=BASE_TARGET_MW||activated.current_entry13!=ENTRY13_TARGET||
++      activated.current_entry14!=ENTRY14_TARGET||activated.current_current_mw!=BASE_TARGET_MW){
++    st=NV_ERR_INVALID_STATE;
++   }
++  }else if(p->postActivationResolverStatus==GS_NOT_FOUND){
++   activated=after;activated.current_current_mw=BASE_TARGET_MW;st=NV_OK;
++  }
++  if(st!=NV_OK){
++   NV_STATUS verifyStatus=st;
++   releaseStatus=gspSemanticReleaseCtgp(&c,&after);
++   if(releaseStatus==NV_OK)(void)gspSemanticRollbackPlan(&c,plan,GSP_SEMANTIC_TRANSACTION_WRITES);
++   else gspSemanticState.poisoned=1;
++   st=verifyStatus;r=after;goto output;
++  }
++  gspSemanticState.active=1;gspSemanticState.resolution=activated;r=activated;p->stage=100;goto output;
++ }
++ st=NV_ERR_INVALID_ARGUMENT;
++output:
++ gspSemanticOutput(p,&c,&r);gspSemanticContextDestroy(&c);
++output_no_context:
++ p->result=st;p->armed=gspSemanticState.armed;p->active=gspSemanticState.active;
++ p->poisoned=gspSemanticState.poisoned||gspProbe_poisoned;p->writes=gspSemanticState.writes;p->transferCalls=gspProbe_callsUsed;
++ p->rollbackWrites=gspSemanticState.rollbackWrites;
++ return NV_OK;
++}
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.h b/src/nvidia/interface/deprecated/gsp_read_probe.h
+new file mode 100644
+index 0000000..a1a609e
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: MIT. Fixed observed heap, read-only experimental ABI. */
++#ifndef CODEX_GSP_READ_PROBE_H
++#define CODEX_GSP_READ_PROBE_H
++#define GSP_READ_PROBE_CMD 0x2080ff71U
++#define GSP_READ_PROBE_VERSION 4U
++#define GSP_READ_PROBE_WPR_START 0x3ef020000ULL
++#define GSP_READ_PROBE_WPR_END   0x3f9c60000ULL
++#define GSP_READ_PROBE_SOURCE    0x3ef024000ULL
++#define GSP_READ_PROBE_HEAP_SIZE 0x73dc000ULL
++#define GSP_READ_PROBE_PAGE_SIZE 4096U
++#define GSP_READ_PROBE_MAX_CALLS 32768U
++typedef struct {
++ NvU32 version, operation, reserved[2];
++ NvU64 pageOffset; /* Input: relative, page-aligned, inside this fixed heap only. */
++ NvU32 stage, rpcStatus, bytesRead, retainedBuffer, callsUsed, reservedOut;
++ NvU64 wprStart, wprEnd, image, imageSize, heap, heapSize, source;
++ NvU8 data[GSP_READ_PROBE_PAGE_SIZE];
++} GSP_READ_PROBE_PARAMS;
++static int gspReadProbeBuild(NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS *p,
++ NvU32 pci, NvU32 sub, NvU64 start, NvU64 end, NvU64 offset, NvU64 dest) {
++ if (pci != 0x2c1910deU || sub != 0x60411d05U ||
++     start != GSP_READ_PROBE_WPR_START || end != GSP_READ_PROBE_WPR_END ||
++     (offset & 4095) || offset > GSP_READ_PROBE_HEAP_SIZE-4096 ||
++     !dest || (dest & 4095) || dest > (~(NvU64)0)-4095) return 0;
++ *p = (NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS){0};
++ p->src.baseAddr=GSP_READ_PROBE_SOURCE+offset; p->src.size=4096;
++ p->src.aperture=2; p->src.cpuCacheAttrib=0;
++ p->dst.baseAddr=dest; p->dst.size=4096; p->dst.aperture=1; p->dst.cpuCacheAttrib=0;
++ p->transferSize=4096; p->memop=NV2080_CTRL_MEMMGR_MEMORY_OP_MEMCPY;
++ return 1;
++}
++#endif
+diff --git a/src/nvidia/interface/deprecated/gsp_read_probe.inc b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+new file mode 100644
+index 0000000..c327223
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_read_probe.inc
+@@ -0,0 +1,117 @@
++static NvBool gspProbe_reserveRestore, gspProbe_internalRead;
++static OBJGPU *gspProbe_owner;
++    static NvBool gspProbe_poisoned = NV_FALSE;
++    static NvU32 gspProbe_callsUsed;
++    /* Keep an uncertain DMA destination alive after any failed RPC. One allocation
++     * maximum; recovery is reboot, not hot unloading this experimental module. */
++    static MEMORY_DESCRIPTOR *gspProbe_retainedDesc;
++    static void *gspProbe_retainedMap, *gspProbe_retainedPriv;
++
++/* SPDX-License-Identifier: MIT
++ * Experimental, explicitly triggered, 4096-byte RM heap page read. GPU group lock held.
++ * The caller cannot provide an address, a size, or bytes to write to GPU memory.
++ */
++static NV_STATUS gspReadProbe(OBJGPU *pGpu, GSP_READ_PROBE_PARAMS *out, NvU32 size)
++{
++    KernelGsp *kgsp = GPU_GET_KERNEL_GSP(pGpu);
++    MEMORY_DESCRIPTOR *desc = NULL;
++    void *map = NULL, *priv = NULL;
++    NvU32 operation;
++    NvU64 start, end, image, imageSize, heap, heapSize, offset;
++    NV_STATUS status;
++    NV_RANGE wprRegions[2] = {NV_RANGE_EMPTY, NV_RANGE_EMPTY};
++    RM_API *api = GPU_GET_PHYSICAL_RMAPI(pGpu);
++    NV2080_CTRL_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP_PARAMS transfer;
++
++    if (size != sizeof(*out) || out->version != GSP_READ_PROBE_VERSION ||
++        out->operation > 1 || out->reserved[0] || out->reserved[1] ||
++        (out->operation == 0 && out->pageOffset != 0))
++        return NV_ERR_INVALID_ARGUMENT;
++    if (IS_VIRTUAL(pGpu) || gpuIsCCFeatureEnabled(pGpu) || kgsp == NULL ||
++        pGpu->idInfo.PCIDeviceID != 0x2c1910deU ||
++        pGpu->idInfo.PCISubDeviceID != 0x60411d05U)
++        return NV_ERR_NOT_SUPPORTED;
++
++    if (kgsp->pWprMetaHopper != NULL)
++    {
++        GspFwWprMeta *m = kgsp->pWprMetaHopper;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else if (kgsp->pWprMetaV1 != NULL)
++    {
++        GspFwWprMetaV1 *m = kgsp->pWprMetaV1;
++        if (m->magic != GSP_FW_WPR_META_MAGIC) return NV_ERR_INVALID_DATA;
++        start=m->gspFwWprStart; end=m->gspFwWprEnd;
++        image=m->gspFwOffset; imageSize=m->sizeOfRadix3Elf;
++        heap=m->gspFwHeapOffset; heapSize=m->gspFwHeapSize;
++    }
++    else return NV_ERR_NOT_SUPPORTED;
++
++    /* Hopper+ boot input does not receive ACR-computed offsets back. Read the
++     * actual WPR registers through NVIDIA's architecture-specific read helper.
++     * No guessed image/heap address and no hardware register write. */
++    kbusCarveoutWprs_HAL(pGpu, GPU_GET_KERNEL_BUS(pGpu), wprRegions);
++    if (wprRegions[1].hi < wprRegions[1].lo || wprRegions[1].hi == ~(NvU64)0)
++        return NV_ERR_INVALID_DATA;
++    start=wprRegions[1].lo; end=wprRegions[1].hi+1;
++    /* This probe is deliberately fixed to the observed layout. The first
++     * 16 KiB of WPR2 are NOT in the RM FB mapper's allowed regions. */
++    if (start != GSP_READ_PROBE_WPR_START || end != GSP_READ_PROBE_WPR_END ||
++        imageSize != 0x19be000ULL || heapSize != 0x8a00000ULL)
++        return NV_ERR_INVALID_DATA;
++
++    if (gspProbe_owner != NULL && gspProbe_owner != pGpu) return NV_ERR_NOT_SUPPORTED;
++    gspProbe_owner=pGpu;
++    operation=out->operation; offset=out->pageOffset;
++    portMemSet(out,0,sizeof(*out));
++    out->version=GSP_READ_PROBE_VERSION; out->operation=operation;
++    out->wprStart=start; out->wprEnd=end; out->image=image;
++    out->imageSize=imageSize; out->heap=heap; out->heapSize=heapSize;
++    out->pageOffset=offset; out->callsUsed=gspProbe_callsUsed;
++    out->retainedBuffer=gspProbe_poisoned;
++    /* Validate firmware metadata before any allocation or GSP command. */
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,offset,4096))
++        return NV_ERR_INVALID_DATA;
++    out->source=GSP_READ_PROBE_SOURCE+offset;
++    out->stage=1;
++    if (operation == 0) return NV_OK;
++    if (gspProbe_poisoned || gspProbe_callsUsed >= GSP_READ_PROBE_MAX_CALLS ||
++        (gspProbe_reserveRestore && !gspProbe_internalRead && gspProbe_callsUsed >= GSP_READ_PROBE_MAX_CALLS-256))
++        return NV_ERR_INVALID_STATE;
++
++    status=memdescCreate(&desc,pGpu,4096,4096,NV_TRUE,ADDR_SYSMEM,NV_MEMORY_CACHED,0);
++    if (status != NV_OK) return status;
++    status=memdescAlloc(desc);
++    if (status != NV_OK) goto cleanup;
++    status=memdescMapOld(desc,0,4096,NV_TRUE,NV_PROTECT_READ_WRITE,&map,&priv);
++    if (status != NV_OK) goto cleanup;
++    portMemSet(map,0,4096);
++    if (!gspReadProbeBuild(&transfer,pGpu->idInfo.PCIDeviceID,pGpu->idInfo.PCISubDeviceID,
++                           start,end,offset,memdescGetPhysAddr(desc,AT_GPU,0)))
++    { status=NV_ERR_INVALID_DATA; goto cleanup; }
++    out->callsUsed=++gspProbe_callsUsed;
++    out->stage=2;
++    status=api->Control(api,pGpu->hInternalClient,pGpu->hInternalSubdevice,
++        NV2080_CTRL_CMD_INTERNAL_MEMMGR_MEMORY_TRANSFER_WITH_GSP,&transfer,sizeof(transfer));
++    out->rpcStatus=status;
++    if (status != NV_OK)
++    {
++        gspProbe_poisoned=NV_TRUE;
++        gspProbe_retainedDesc=desc; gspProbe_retainedMap=map; gspProbe_retainedPriv=priv;
++        out->retainedBuffer=1;
++        NV_PRINTF(LEVEL_ERROR,"GSP read probe RPC failed: 0x%x; destination retained until reboot\n",status);
++        /* Static ownership references retained intentionally. */
++        (void)gspProbe_retainedDesc; (void)gspProbe_retainedMap; (void)gspProbe_retainedPriv;
++        return NV_OK; /* Deliver the actual RPC status in the output. */
++    }
++    portMemCopy(out->data,sizeof(out->data),map,4096);
++    out->bytesRead=4096; out->stage=3;
++cleanup:
++    if (map != NULL) memdescUnmapOld(desc,NV_TRUE,map,priv);
++    memdescFree(desc); memdescDestroy(desc);
++    return status;
++}
+diff --git a/src/nvidia/interface/deprecated/gsp_semantic_adapter.inc b/src/nvidia/interface/deprecated/gsp_semantic_adapter.inc
+new file mode 100644
+index 0000000..23d7e49
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_semantic_adapter.inc
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: MIT
++ * Compile the portable semantic resolver inside RM with NVIDIA's base types.
++ * The resolver owns no memory and its input callback is read-only.
++ */
++#define GS_EXTERNAL_TYPES 1
++#define uint8_t NvU8
++#define uint16_t NvU16
++#define uint32_t NvU32
++#define uint64_t NvU64
++#include "gsp_semantic_core.c"
++#undef uint64_t
++#undef uint32_t
++#undef uint16_t
++#undef uint8_t
++#undef GS_EXTERNAL_TYPES
+diff --git a/src/nvidia/interface/deprecated/gsp_semantic_core.c b/src/nvidia/interface/deprecated/gsp_semantic_core.c
+new file mode 100644
+index 0000000..af9f226
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_semantic_core.c
+@@ -0,0 +1,342 @@
++/* SPDX-License-Identifier: MIT
++ * Address-free, offset-free semantic resolver reference core.
++ */
++#include "gsp_semantic_core.h"
++
++#define POLICY_SLOTS 20U
++#define PREFIX_LIMIT 0x1000U
++#define IDENTITY_LIMIT 0x80U
++#define CANDIDATE_LIMIT 64U
++#define BOARD_CONTRACT_FIRST 0x300U
++#define BOARD_CONTRACT_LAST  0x500U
++#define RAIL_CONTRACT_LAST   0x300U
++#define BASE_STOCK_MW 150000U
++#define BASE_TARGET_MW 225000U
++#define ENTRY13_STOCK 210000U
++#define ENTRY13_TARGET 250000U
++#define ENTRY14_STOCK 60000U
++#define ENTRY14_TARGET 100000U
++
++static int rd(const struct gs_io *io, uint64_t o, void *p, uint32_t n)
++{
++    if (n > io->heap_size || o > io->heap_size - n) return GS_INVALID;
++    return io->read(io->context, o, p, n) ? GS_IO : GS_OK;
++}
++static int r8(const struct gs_io *io, uint64_t o, uint8_t *v) { return rd(io,o,v,1); }
++static int r16(const struct gs_io *io, uint64_t o, uint16_t *v) { return rd(io,o,v,2); }
++static int r32(const struct gs_io *io, uint64_t o, uint32_t *v) { return rd(io,o,v,4); }
++static int r64(const struct gs_io *io, uint64_t o, uint64_t *v) { return rd(io,o,v,8); }
++static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
++static uint64_t le64(const uint8_t *p) { return (uint64_t)le32(p)|((uint64_t)le32(p+4)<<32); }
++
++static int same(const struct gs_resolution *a, const struct gs_resolution *b)
++{
++    uint32_t i;
++    if(!(a->va_base==b->va_base&&a->policy_array==b->policy_array&&
++        a->board_object==b->board_object&&a->selector==b->selector&&
++        a->lower_selector==b->lower_selector&&a->ctgp_tuple==b->ctgp_tuple&&
++        a->index_member==b->index_member&&a->type_member==b->type_member&&
++        a->id_member==b->id_member&&a->unit_member==b->unit_member&&
++        a->board_max_effective==b->board_max_effective&&
++        a->board_max_source==b->board_max_source&&a->pmgr_upper==b->pmgr_upper&&
++        a->stock_upper_mw==b->stock_upper_mw&&a->current_upper_mw==b->current_upper_mw&&
++        a->base_internal==b->base_internal&&a->entry13_object==b->entry13_object&&
++        a->entry14_object==b->entry14_object&&a->stock_base_mw==b->stock_base_mw&&
++        a->current_base_mw==b->current_base_mw&&a->stock_entry13==b->stock_entry13&&
++        a->current_entry13==b->current_entry13&&a->stock_entry14==b->stock_entry14&&
++        a->current_entry14==b->current_entry14&&a->current_selector==b->current_selector&&
++        a->current_member==b->current_member&&a->stock_current_mw==b->stock_current_mw&&
++        a->current_current_mw==b->current_current_mw))return 0;
++    for(i=0;i<GS_RAIL_WRITERS;i++)if(a->entry13_writers[i]!=b->entry13_writers[i]||
++                                      a->entry14_writers[i]!=b->entry14_writers[i])return 0;
++    return 1;
++}
++
++static int find_current_contract(const struct gs_io *io, uint64_t board,
++                                 uint32_t lower, uint64_t *selector,
++                                 uint64_t *member, uint32_t *current)
++{
++    uint32_t hits=0;int st,stock_shape,active_shape;
++    for(uint32_t rel=0;rel+20<=RAIL_CONTRACT_LAST;rel+=4){
++        uint8_t bytes[20];uint32_t effective,reference,source_value;
++        if((st=rd(io,board+rel,bytes,sizeof(bytes))))return st;
++        effective=le32(bytes+4);reference=le32(bytes+8);source_value=le32(bytes+16);
++        stock_shape=bytes[1]==2&&effective==lower&&source_value==lower;
++        active_shape=bytes[1]==3&&effective==BASE_TARGET_MW&&source_value==0xffffffffU;
++        if(bytes[0]!=0||bytes[12]!=0xfe||reference!=lower||
++           (!stock_shape&&!active_shape))continue;
++        *selector=board+rel;*member=board+rel+4;*current=effective;hits++;
++    }
++    return hits==1?GS_OK:(hits?GS_AMBIGUOUS:GS_NOT_FOUND);
++}
++
++static int find_base_internal(const struct gs_io *io, uint64_t board,
++                              uint64_t *member, uint32_t *current)
++{
++    uint32_t hits=0, value;int st;
++    for(uint32_t rel=BOARD_CONTRACT_FIRST;rel<=BOARD_CONTRACT_LAST;rel+=4){
++        if((st=r32(io,board+rel,&value)))return st;
++        if(value==BASE_STOCK_MW||value==BASE_TARGET_MW){*member=board+rel;*current=value;hits++;}
++    }
++    return hits==1?GS_OK:(hits?GS_AMBIGUOUS:GS_NOT_FOUND);
++}
++
++static int find_rail_contract(const struct gs_io *io, uint64_t object,
++                              uint16_t index, uint8_t id, uint32_t stock,
++                              uint32_t target, uint32_t index_member,
++                              uint64_t writers[GS_RAIL_WRITERS],uint32_t *current)
++{
++    uint16_t observed_index;uint32_t count=0,state=0;int st;
++    uint32_t type_hits=0,id_hits=0;
++    if((st=r16(io,object+index_member,&observed_index)))return st;
++    if(observed_index!=index)return GS_NOT_FOUND;
++    /* The type and ID positions are discovered by their cross-entry relation,
++     * rather than assumed from a driver-version layout. */
++    for(uint32_t rel=0;rel<IDENTITY_LIMIT;rel++){
++        uint8_t a;
++        if((st=r8(io,object+rel,&a)))return st;
++        if(a==18)type_hits++;
++        if(a==id)id_hits++;
++    }
++    if(type_hits!=1||id_hits!=1)return GS_NOT_FOUND;
++    for(uint32_t rel=0;rel+20<=RAIL_CONTRACT_LAST;rel+=4){
++        uint8_t bytes[20];uint32_t effective,reference,source_value;
++        if((st=rd(io,object+rel,bytes,sizeof(bytes))))return st;
++        effective=le32(bytes+4);reference=le32(bytes+8);source_value=le32(bytes+16);
++        if(bytes[0]!=0||bytes[1]!=1||bytes[12]!=0xfe||reference!=stock||
++           effective!=source_value||(effective!=stock&&effective!=target))continue;
++        if(count>=3)return GS_AMBIGUOUS;
++        writers[count*2]=object+rel+4;writers[count*2+1]=object+rel+16;
++        if(!count)state=effective;else if(state!=effective)return GS_INVALID;
++        count++;
++    }
++    if(count!=3)return GS_NOT_FOUND;
++    *current=state;return GS_OK;
++}
++
++static int enrich_contract(const struct gs_io *io, const uint64_t objects[POLICY_SLOTS],
++                           struct gs_resolution *candidate)
++{
++    int st;uint32_t lower;
++    if(!objects[13]||!objects[14])return GS_NOT_FOUND;
++    candidate->entry13_object=objects[13];candidate->entry14_object=objects[14];
++    candidate->stock_base_mw=BASE_STOCK_MW;
++    candidate->stock_entry13=ENTRY13_STOCK;candidate->stock_entry14=ENTRY14_STOCK;
++    st=find_base_internal(io,candidate->board_object,&candidate->base_internal,
++                          &candidate->current_base_mw);if(st)return st;
++    st=find_rail_contract(io,objects[13],13,27,ENTRY13_STOCK,ENTRY13_TARGET,
++                          candidate->index_member,candidate->entry13_writers,
++                          &candidate->current_entry13);if(st)return st;
++    st=find_rail_contract(io,objects[14],14,28,ENTRY14_STOCK,ENTRY14_TARGET,
++                          candidate->index_member,candidate->entry14_writers,
++                          &candidate->current_entry14);if(st)return st;
++    if((st=r32(io,candidate->ctgp_tuple+4,&lower)))return st;
++    candidate->stock_current_mw=lower;
++    st=find_current_contract(io,candidate->board_object,lower,
++                             &candidate->current_selector,&candidate->current_member,
++                             &candidate->current_current_mw);if(st)return st;
++    return GS_OK;
++}
++
++struct selector_candidate { uint64_t offset; uint32_t effective,stock; };
++struct ctgp_candidate { uint64_t offset; uint32_t lower,upper; };
++
++int gs_resolve_autonomous(const struct gs_io *io, struct gs_resolution *out)
++{
++    struct selector_candidate selectors[CANDIDATE_LIMIT];
++    struct ctgp_candidate ctgps[CANDIDATE_LIMIT];
++    uint32_t ns=0,nc=0,solutions=0;struct gs_resolution answer={0};int st;
++    if(!io||!io->read||!out||io->heap_size<0x10000||io->heap_size>GS_HEAP_LIMIT)return GS_INVALID;
++    for(uint64_t o=0;o+20<=io->heap_size;o+=4){
++        uint8_t window[20],mode,count,source;uint32_t first,effective,stock,source_value;
++        if((st=rd(io,o,window,sizeof(window))))return st;
++        mode=window[0];count=window[1];source=window[12];first=le32(window);
++        effective=le32(window+4);stock=le32(window+8);source_value=le32(window+16);
++        if(mode==0&&count==1&&source==0xfe&&effective==source_value&&
++           stock>=20000&&stock<=effective&&effective<=400000){
++            if(ns==CANDIDATE_LIMIT)return GS_BUDGET;
++            selectors[ns++]=(struct selector_candidate){o,effective,stock};
++        }
++        if(first==2&&effective>=20000&&effective<=stock&&stock<=400000){
++            if(nc==CANDIDATE_LIMIT)return GS_BUDGET;
++            ctgps[nc++]=(struct ctgp_candidate){o,effective,stock};
++        }
++    }
++    if(!ns||!nc)return GS_NOT_FOUND;
++
++    /* A cTGP bound must be independently represented by selector defaults. */
++    for(uint32_t c=0;c<nc;c++){
++        int lo=0,hi=0;for(uint32_t s=0;s<ns;s++){
++            if(selectors[s].stock==ctgps[c].lower||selectors[s].effective==ctgps[c].lower)lo=1;
++            if(selectors[s].stock==ctgps[c].upper||selectors[s].effective==ctgps[c].upper)hi=1;
++        }
++        if(!lo||!hi)ctgps[c].offset=~0ULL;
++    }
++
++    /* Candidate arrays are discovered from shape, then accepted only if all
++     * non-null entries resolve to heap objects with one common index member. */
++    for(uint64_t array=0;array+POLICY_SLOTS*8<=io->heap_size;array+=8){
++        uint8_t window[POLICY_SLOTS*8];uint64_t raw[POLICY_SLOTS],lo=~0ULL,hi=0;uint32_t active=0;int shape=1;
++        if((st=rd(io,array,window,sizeof(window))))return st;
++        for(uint32_t i=0;i<POLICY_SLOTS;i++){
++            raw[i]=le64(window+i*8);
++            if(raw[i]){if(raw[i]&7){shape=0;break;}if(raw[i]<lo)lo=raw[i];if(raw[i]>hi)hi=raw[i];active++;}
++        }
++        if(!shape||active<8||!raw[2]||hi-lo>=io->heap_size)continue;
++        for(uint32_t s=0;s<ns;s++){
++            uint64_t selector=selectors[s].offset,first=selector>PREFIX_LIMIT?selector-PREFIX_LIMIT:0;
++            uint64_t board=(first&~0xfffULL)|(raw[2]&0xfffULL);
++            if(board<first)board+=0x1000;
++            for(;board<=selector;board+=0x1000){
++                uint64_t base=raw[2]-board,objects[POLICY_SLOTS]={0};uint32_t im=0,im_count=0;int good=1;
++                if(!base||(base&0xfff))continue;
++                for(uint32_t i=0;i<POLICY_SLOTS;i++)if(raw[i]){
++                    if(raw[i]<base||raw[i]-base>=io->heap_size){good=0;break;}objects[i]=raw[i]-base;
++                }
++                if(!good||objects[2]!=board)continue;
++                for(uint32_t member=0;member<IDENTITY_LIMIT;member++){
++                    int match=1;for(uint32_t i=0;i<POLICY_SLOTS;i++)if(raw[i]){
++                        uint8_t value;if((st=r8(io,objects[i]+member,&value)))return st;
++                        if(value!=i){match=0;break;}
++                    }
++                    if(match){im=member;im_count++;}
++                }
++                if(im_count!=1)continue;
++                for(uint32_t i=0;i<POLICY_SLOTS;i++)if(raw[i]){
++                    uint16_t value;if((st=r16(io,objects[i]+im,&value)))return st;
++                    if(value!=i){good=0;break;}
++                }
++                if(!good||selector<board||selector>=board+PREFIX_LIMIT)continue;
++                {
++                    uint32_t links=0;uint64_t lower_selector=0,ctgp=0;
++                    for(uint32_t c=0;c<nc;c++)if(ctgps[c].offset!=~0ULL&&ctgps[c].upper==selectors[s].effective){
++                        uint32_t lower_hits=0;uint64_t lower_at=0;
++                        for(uint32_t q=0;q<ns;q++)if((selectors[q].stock==ctgps[c].lower||selectors[q].effective==ctgps[c].lower)&&
++                            selectors[q].offset>=board&&selectors[q].offset<board+PREFIX_LIMIT){lower_hits++;lower_at=selectors[q].offset;}
++                        if(lower_hits==1){links++;lower_selector=lower_at;ctgp=ctgps[c].offset;}
++                    }
++                    if(links==1){
++                        uint32_t current;if((st=r32(io,ctgp+8,&current)))return st;
++                        struct gs_resolution candidate={0};
++                        candidate.va_base=base;candidate.policy_array=array;candidate.board_object=board;
++                        candidate.selector=selector;candidate.lower_selector=lower_selector;candidate.ctgp_tuple=ctgp;
++                        candidate.index_member=im;candidate.type_member=candidate.id_member=candidate.unit_member=~0U;
++                        candidate.board_max_effective=selector+4;candidate.board_max_source=selector+16;
++                        candidate.pmgr_upper=ctgp+8;candidate.stock_upper_mw=selectors[s].stock;
++                        candidate.current_upper_mw=current;
++                        st=enrich_contract(io,objects,&candidate);if(st==GS_IO||st==GS_INVALID)return st;
++                        if(st!=GS_OK)continue;
++                        if(!solutions){answer=candidate;solutions=1;}
++                        else if(!same(&answer,&candidate))solutions++;
++                    }
++                }
++            }
++        }
++    }
++    if(!solutions)return GS_NOT_FOUND;
++    if(solutions!=1)return GS_AMBIGUOUS;
++    *out=answer;
++    return GS_OK;
++}
++
++int gs_resolve(const struct gs_io *io, uint32_t mask,
++               const struct gs_policy *ps, uint32_t n,
++               struct gs_resolution *out)
++{
++    uint64_t selectors[CANDIDATE_LIMIT], arrays[CANDIDATE_LIMIT], ctgps[CANDIDATE_LIMIT];
++    uint32_t ns=0, na=0, nc=0, i, j, board_slot=~0U, expected_mask=0;
++    uint32_t board_lower=0, board_upper=0, solutions=0;
++    struct gs_resolution answer={0};
++    int st;
++    if (!io || !io->read || !ps || !out || n==0 || n>GS_POLICY_LIMIT ||
++        io->heap_size<0x10000 || io->heap_size>GS_HEAP_LIMIT || (mask>>POLICY_SLOTS)) return GS_INVALID;
++    for(i=0;i<n;i++) {
++        if (ps[i].index>=POLICY_SLOTS || ps[i].lower_mw>ps[i].upper_mw ||
++            (expected_mask&(1U<<ps[i].index))) return GS_INVALID;
++        expected_mask|=1U<<ps[i].index;
++        if(ps[i].index==2){board_slot=i;board_lower=ps[i].lower_mw;board_upper=ps[i].upper_mw;}
++    }
++    if(expected_mask!=mask || board_slot==~0U)return GS_INVALID;
++
++    /* Pass 1: semantic records. */
++    for(uint64_t o=0;o+20<=io->heap_size;o+=4){
++        uint8_t mode,count,source;uint32_t first,effective,stock,source_value;
++        if((st=r8(io,o,&mode))||(st=r8(io,o+1,&count))||(st=r32(io,o+4,&effective))||
++           (st=r32(io,o,&first))||(st=r32(io,o+8,&stock))||(st=r8(io,o+12,&source))||
++           (st=r32(io,o+16,&source_value)))return st;
++        if(mode==0&&count==1&&stock==board_upper&&source==0xfe&&effective==source_value&&
++           effective>=board_upper&&effective<=400000){
++            if(ns==CANDIDATE_LIMIT)return GS_BUDGET;
++            selectors[ns++]=o;
++        }
++        if(first==2&&effective==board_lower&&stock>=board_upper&&stock<=400000){
++            if(nc==CANDIDATE_LIMIT)return GS_BUDGET;
++            ctgps[nc++]=o;
++        }
++    }
++    if(ns==0||nc==0)return GS_NOT_FOUND;
++
++    /* Pass 2: arrays whose null/non-null shape exactly follows public mask. */
++    for(uint64_t o=0;o+POLICY_SLOTS*8<=io->heap_size;o+=8){
++        uint64_t lo=~0ULL,hi=0,p;int good=1;
++        for(i=0;i<POLICY_SLOTS;i++){
++            if((st=r64(io,o+i*8,&p)))return st;
++            if(mask&(1U<<i)){if(!p||(p&7)){good=0;break;}if(p<lo)lo=p;if(p>hi)hi=p;}
++            else if(p){good=0;break;}
++        }
++        if(good&&hi-lo<io->heap_size){if(na==CANDIDATE_LIMIT)return GS_BUDGET;arrays[na++]=o;}
++    }
++    if(na==0)return GS_NOT_FOUND;
++
++    for(uint32_t si=0;si<ns;si++)for(uint32_t ai=0;ai<na;ai++){
++        uint64_t selector=selectors[si],array=arrays[ai],board_va,first;
++        if((st=r64(io,array+16,&board_va)))return st;
++        first=selector>PREFIX_LIMIT?selector-PREFIX_LIMIT:0; first=(first+7)&~7ULL;
++        for(uint64_t board=first;board<=selector;board+=8){
++            uint64_t base=board_va-board,objects[POLICY_SLOTS]={0};int good=1;
++            uint32_t im[4]={0},counts[4]={0};
++            if(!base||(base&0xfff))continue;
++            for(i=0;i<n;i++){
++                uint64_t p;if((st=r64(io,array+ps[i].index*8,&p)))return st;
++                if(p<base||p-base>=io->heap_size){good=0;break;}objects[ps[i].index]=p-base;
++            }
++            if(!good||objects[2]!=board)continue;
++            for(uint32_t member=0;member<IDENTITY_LIMIT;member++){
++                int match[4]={1,1,1,1};
++                for(i=0;i<n;i++){
++                    uint8_t v;if((st=r8(io,objects[ps[i].index]+member,&v)))return st;
++                    if(v!=ps[i].index)match[0]=0;
++                    if(v!=ps[i].type)match[1]=0;
++                    if(v!=ps[i].id)match[2]=0;
++                    if(v!=ps[i].unit)match[3]=0;
++                }
++                for(j=0;j<4;j++)if(match[j]){im[j]=member;counts[j]++;}
++            }
++            if(counts[0]!=1||counts[1]!=1||counts[2]!=1||counts[3]!=1||
++               im[0]==im[1]||im[0]==im[2]||im[0]==im[3]||im[1]==im[2]||
++               im[1]==im[3]||im[2]==im[3])continue;
++            for(i=0;i<n;i++){uint16_t v;if((st=r16(io,objects[ps[i].index]+im[0],&v)))return st;if(v!=ps[i].index){good=0;break;}}
++            if(!good||selector<board||selector>=board+PREFIX_LIMIT)continue;
++            /* A coherent topology must contain exactly one cTGP tuple. */
++            if(nc!=1)continue;
++            {
++                uint32_t current;if((st=r32(io,ctgps[0]+8,&current)))return st;
++                struct gs_resolution candidate={0};
++                candidate.va_base=base;candidate.policy_array=array;candidate.board_object=board;
++                candidate.selector=selector;candidate.ctgp_tuple=ctgps[0];
++                candidate.index_member=im[0];candidate.type_member=im[1];
++                candidate.id_member=im[2];candidate.unit_member=im[3];
++                candidate.board_max_effective=selector+4;candidate.board_max_source=selector+16;
++                candidate.pmgr_upper=ctgps[0]+8;candidate.stock_upper_mw=board_upper;
++                candidate.current_upper_mw=current;
++                st=enrich_contract(io,objects,&candidate);if(st==GS_IO||st==GS_INVALID)return st;
++                if(st!=GS_OK)continue;
++                if(solutions==0){answer=candidate;solutions=1;}
++                else if(!same(&answer,&candidate))solutions++;
++            }
++        }
++    }
++    if(solutions==0)return GS_NOT_FOUND;
++    if(solutions!=1)return GS_AMBIGUOUS;
++    *out=answer;return GS_OK;
++}
+diff --git a/src/nvidia/interface/deprecated/gsp_semantic_core.h b/src/nvidia/interface/deprecated/gsp_semantic_core.h
+new file mode 100644
+index 0000000..a0157d1
+--- /dev/null
++++ b/src/nvidia/interface/deprecated/gsp_semantic_core.h
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef CODEX_GSP_SEMANTIC_CORE_H
++#define CODEX_GSP_SEMANTIC_CORE_H
++
++#ifndef GS_EXTERNAL_TYPES
++#include <stdint.h>
++#endif
++
++#define GS_POLICY_LIMIT 32U
++#define GS_HEAP_LIMIT (256ULL * 1024ULL * 1024ULL)
++#define GS_RAIL_WRITERS 6U
++
++enum gs_status {
++    GS_OK = 0,
++    GS_INVALID = 1,
++    GS_IO = 2,
++    GS_NOT_FOUND = 3,
++    GS_AMBIGUOUS = 4,
++    GS_BUDGET = 5
++};
++
++struct gs_policy {
++    uint8_t index, type, id, unit;
++    uint32_t lower_mw, upper_mw;
++};
++
++struct gs_io {
++    void *context;
++    int (*read)(void *context, uint64_t offset, void *destination, uint32_t size);
++    uint64_t heap_size;
++};
++
++struct gs_resolution {
++    uint64_t va_base, policy_array, board_object, selector, lower_selector, ctgp_tuple;
++    uint32_t index_member, type_member, id_member, unit_member;
++    uint64_t board_max_effective, board_max_source, pmgr_upper;
++    uint32_t stock_upper_mw, current_upper_mw;
++    uint64_t base_internal, entry13_object, entry14_object;
++    uint64_t entry13_writers[GS_RAIL_WRITERS];
++    uint64_t entry14_writers[GS_RAIL_WRITERS];
++    uint32_t stock_base_mw, current_base_mw;
++    uint32_t stock_entry13, current_entry13;
++    uint32_t stock_entry14, current_entry14;
++    uint64_t current_selector, current_member;
++    uint32_t stock_current_mw, current_current_mw;
++};
++
++/* Primary production path: no caller-supplied addresses, offsets, policy
++ * records, stock limits or driver-version profile. */
++int gs_resolve_autonomous(const struct gs_io *io, struct gs_resolution *out);
++
++int gs_resolve(const struct gs_io *io, uint32_t public_mask,
++               const struct gs_policy *policies, uint32_t policy_count,
++               struct gs_resolution *out);
++
++#endif
+diff --git a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+index 91e69d5..4b5d18b 100644
+--- a/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
++++ b/src/nvidia/interface/deprecated/rmapi_gss_legacy_control.c
+@@ -30,6 +30,15 @@
+ 
+ #include "g_finn_rm_api.h"
+ #include "core/thread_state.h"
++#include "gpu/gsp/kernel_gsp.h"
++#include "gpu/bus/kern_bus.h"
++#include "gpu/mem_mgr/mem_mgr.h"
++#include "os/nv_memory_type.h"
++#include "ctrl/ctrl2080/ctrl2080internal.h"
++#include "gsp_read_probe.h"
++#include "gsp_read_probe.inc"
++#include "gsp_power_probe.h"
++#include "gsp_power_probe.inc"
+ 
+ /*!
+  * Some clients are still making these legacy GSS controls. We no longer support these in RM,
+@@ -132,6 +141,18 @@ NV_STATUS RmGssLegacyRpcCmd
+     if (status != NV_OK)
+         goto done;
+ 
++    if (pArgs->cmd == GSP_POWER_PROBE_CMD)
++    {
++        status = gspPowerProbe(pGpu, pKernelParams, pArgs->paramsSize);
++        goto done;
++    }
++
++    if (pArgs->cmd == GSP_READ_PROBE_CMD)
++    {
++        status = gspReadProbe(pGpu, pKernelParams, pArgs->paramsSize);
++        goto done;
++    }
++
+     if (IS_VIRTUAL(pGpu))
+     {
+         NV_RM_RPC_API_CONTROL(pGpu,

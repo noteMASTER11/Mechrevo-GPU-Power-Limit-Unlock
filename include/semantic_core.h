@@ -8,6 +8,7 @@
 
 #define GS_POLICY_LIMIT 32U
 #define GS_HEAP_LIMIT (256ULL * 1024ULL * 1024ULL)
+#define GS_RAIL_WRITERS 6U
 
 enum gs_status {
     GS_OK = 0,
@@ -34,6 +35,14 @@ struct gs_resolution {
     uint32_t index_member, type_member, id_member, unit_member;
     uint64_t board_max_effective, board_max_source, pmgr_upper;
     uint32_t stock_upper_mw, current_upper_mw;
+    uint64_t base_internal, entry13_object, entry14_object;
+    uint64_t entry13_writers[GS_RAIL_WRITERS];
+    uint64_t entry14_writers[GS_RAIL_WRITERS];
+    uint32_t stock_base_mw, current_base_mw;
+    uint32_t stock_entry13, current_entry13;
+    uint32_t stock_entry14, current_entry14;
+    uint64_t current_selector, current_member;
+    uint32_t stock_current_mw, current_current_mw;
 };
 
 /* Primary production path: no caller-supplied addresses, offsets, policy

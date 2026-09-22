@@ -7,6 +7,15 @@
 #define PREFIX_LIMIT 0x1000U
 #define IDENTITY_LIMIT 0x80U
 #define CANDIDATE_LIMIT 64U
+#define BOARD_CONTRACT_FIRST 0x300U
+#define BOARD_CONTRACT_LAST  0x500U
+#define RAIL_CONTRACT_LAST   0x300U
+#define BASE_STOCK_MW 150000U
+#define BASE_TARGET_MW 225000U
+#define ENTRY13_STOCK 210000U
+#define ENTRY13_TARGET 250000U
+#define ENTRY14_STOCK 60000U
+#define ENTRY14_TARGET 100000U
 
 static int rd(const struct gs_io *io, uint64_t o, void *p, uint32_t n)
 {
@@ -22,14 +31,111 @@ static uint64_t le64(const uint8_t *p) { return (uint64_t)le32(p)|((uint64_t)le3
 
 static int same(const struct gs_resolution *a, const struct gs_resolution *b)
 {
-    return a->va_base==b->va_base&&a->policy_array==b->policy_array&&
+    uint32_t i;
+    if(!(a->va_base==b->va_base&&a->policy_array==b->policy_array&&
         a->board_object==b->board_object&&a->selector==b->selector&&
         a->lower_selector==b->lower_selector&&a->ctgp_tuple==b->ctgp_tuple&&
         a->index_member==b->index_member&&a->type_member==b->type_member&&
         a->id_member==b->id_member&&a->unit_member==b->unit_member&&
         a->board_max_effective==b->board_max_effective&&
         a->board_max_source==b->board_max_source&&a->pmgr_upper==b->pmgr_upper&&
-        a->stock_upper_mw==b->stock_upper_mw&&a->current_upper_mw==b->current_upper_mw;
+        a->stock_upper_mw==b->stock_upper_mw&&a->current_upper_mw==b->current_upper_mw&&
+        a->base_internal==b->base_internal&&a->entry13_object==b->entry13_object&&
+        a->entry14_object==b->entry14_object&&a->stock_base_mw==b->stock_base_mw&&
+        a->current_base_mw==b->current_base_mw&&a->stock_entry13==b->stock_entry13&&
+        a->current_entry13==b->current_entry13&&a->stock_entry14==b->stock_entry14&&
+        a->current_entry14==b->current_entry14&&a->current_selector==b->current_selector&&
+        a->current_member==b->current_member&&a->stock_current_mw==b->stock_current_mw&&
+        a->current_current_mw==b->current_current_mw))return 0;
+    for(i=0;i<GS_RAIL_WRITERS;i++)if(a->entry13_writers[i]!=b->entry13_writers[i]||
+                                      a->entry14_writers[i]!=b->entry14_writers[i])return 0;
+    return 1;
+}
+
+static int find_current_contract(const struct gs_io *io, uint64_t board,
+                                 uint32_t lower, uint64_t *selector,
+                                 uint64_t *member, uint32_t *current)
+{
+    uint32_t hits=0;int st,stock_shape,active_shape;
+    for(uint32_t rel=0;rel+20<=RAIL_CONTRACT_LAST;rel+=4){
+        uint8_t bytes[20];uint32_t effective,reference,source_value;
+        if((st=rd(io,board+rel,bytes,sizeof(bytes))))return st;
+        effective=le32(bytes+4);reference=le32(bytes+8);source_value=le32(bytes+16);
+        stock_shape=bytes[1]==2&&effective==lower&&source_value==lower;
+        active_shape=bytes[1]==3&&effective==BASE_TARGET_MW&&source_value==0xffffffffU;
+        if(bytes[0]!=0||bytes[12]!=0xfe||reference!=lower||
+           (!stock_shape&&!active_shape))continue;
+        *selector=board+rel;*member=board+rel+4;*current=effective;hits++;
+    }
+    return hits==1?GS_OK:(hits?GS_AMBIGUOUS:GS_NOT_FOUND);
+}
+
+static int find_base_internal(const struct gs_io *io, uint64_t board,
+                              uint64_t *member, uint32_t *current)
+{
+    uint32_t hits=0, value;int st;
+    for(uint32_t rel=BOARD_CONTRACT_FIRST;rel<=BOARD_CONTRACT_LAST;rel+=4){
+        if((st=r32(io,board+rel,&value)))return st;
+        if(value==BASE_STOCK_MW||value==BASE_TARGET_MW){*member=board+rel;*current=value;hits++;}
+    }
+    return hits==1?GS_OK:(hits?GS_AMBIGUOUS:GS_NOT_FOUND);
+}
+
+static int find_rail_contract(const struct gs_io *io, uint64_t object,
+                              uint16_t index, uint8_t id, uint32_t stock,
+                              uint32_t target, uint32_t index_member,
+                              uint64_t writers[GS_RAIL_WRITERS],uint32_t *current)
+{
+    uint16_t observed_index;uint32_t count=0,state=0;int st;
+    uint32_t type_hits=0,id_hits=0;
+    if((st=r16(io,object+index_member,&observed_index)))return st;
+    if(observed_index!=index)return GS_NOT_FOUND;
+    /* The type and ID positions are discovered by their cross-entry relation,
+     * rather than assumed from a driver-version layout. */
+    for(uint32_t rel=0;rel<IDENTITY_LIMIT;rel++){
+        uint8_t a;
+        if((st=r8(io,object+rel,&a)))return st;
+        if(a==18)type_hits++;
+        if(a==id)id_hits++;
+    }
+    if(type_hits!=1||id_hits!=1)return GS_NOT_FOUND;
+    for(uint32_t rel=0;rel+20<=RAIL_CONTRACT_LAST;rel+=4){
+        uint8_t bytes[20];uint32_t effective,reference,source_value;
+        if((st=rd(io,object+rel,bytes,sizeof(bytes))))return st;
+        effective=le32(bytes+4);reference=le32(bytes+8);source_value=le32(bytes+16);
+        if(bytes[0]!=0||bytes[1]!=1||bytes[12]!=0xfe||reference!=stock||
+           effective!=source_value||(effective!=stock&&effective!=target))continue;
+        if(count>=3)return GS_AMBIGUOUS;
+        writers[count*2]=object+rel+4;writers[count*2+1]=object+rel+16;
+        if(!count)state=effective;else if(state!=effective)return GS_INVALID;
+        count++;
+    }
+    if(count!=3)return GS_NOT_FOUND;
+    *current=state;return GS_OK;
+}
+
+static int enrich_contract(const struct gs_io *io, const uint64_t objects[POLICY_SLOTS],
+                           struct gs_resolution *candidate)
+{
+    int st;uint32_t lower;
+    if(!objects[13]||!objects[14])return GS_NOT_FOUND;
+    candidate->entry13_object=objects[13];candidate->entry14_object=objects[14];
+    candidate->stock_base_mw=BASE_STOCK_MW;
+    candidate->stock_entry13=ENTRY13_STOCK;candidate->stock_entry14=ENTRY14_STOCK;
+    st=find_base_internal(io,candidate->board_object,&candidate->base_internal,
+                          &candidate->current_base_mw);if(st)return st;
+    st=find_rail_contract(io,objects[13],13,27,ENTRY13_STOCK,ENTRY13_TARGET,
+                          candidate->index_member,candidate->entry13_writers,
+                          &candidate->current_entry13);if(st)return st;
+    st=find_rail_contract(io,objects[14],14,28,ENTRY14_STOCK,ENTRY14_TARGET,
+                          candidate->index_member,candidate->entry14_writers,
+                          &candidate->current_entry14);if(st)return st;
+    if((st=r32(io,candidate->ctgp_tuple+4,&lower)))return st;
+    candidate->stock_current_mw=lower;
+    st=find_current_contract(io,candidate->board_object,lower,
+                             &candidate->current_selector,&candidate->current_member,
+                             &candidate->current_current_mw);if(st)return st;
+    return GS_OK;
 }
 
 struct selector_candidate { uint64_t offset; uint32_t effective,stock; };
@@ -118,6 +224,8 @@ int gs_resolve_autonomous(const struct gs_io *io, struct gs_resolution *out)
                         candidate.board_max_effective=selector+4;candidate.board_max_source=selector+16;
                         candidate.pmgr_upper=ctgp+8;candidate.stock_upper_mw=selectors[s].stock;
                         candidate.current_upper_mw=current;
+                        st=enrich_contract(io,objects,&candidate);if(st==GS_IO||st==GS_INVALID)return st;
+                        if(st!=GS_OK)continue;
                         if(!solutions){answer=candidate;solutions=1;}
                         else if(!same(&answer,&candidate))solutions++;
                     }
@@ -213,9 +321,16 @@ int gs_resolve(const struct gs_io *io, uint32_t mask,
             if(nc!=1)continue;
             {
                 uint32_t current;if((st=r32(io,ctgps[0]+8,&current)))return st;
-                struct gs_resolution candidate={base,array,board,selector,0,ctgps[0],
-                    im[0],im[1],im[2],im[3],selector+4,selector+16,ctgps[0]+8,
-                    board_upper,current};
+                struct gs_resolution candidate={0};
+                candidate.va_base=base;candidate.policy_array=array;candidate.board_object=board;
+                candidate.selector=selector;candidate.ctgp_tuple=ctgps[0];
+                candidate.index_member=im[0];candidate.type_member=im[1];
+                candidate.id_member=im[2];candidate.unit_member=im[3];
+                candidate.board_max_effective=selector+4;candidate.board_max_source=selector+16;
+                candidate.pmgr_upper=ctgps[0]+8;candidate.stock_upper_mw=board_upper;
+                candidate.current_upper_mw=current;
+                st=enrich_contract(io,objects,&candidate);if(st==GS_IO||st==GS_INVALID)return st;
+                if(st!=GS_OK)continue;
                 if(solutions==0){answer=candidate;solutions=1;}
                 else if(!same(&answer,&candidate))solutions++;
             }

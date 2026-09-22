@@ -1,7 +1,0 @@
-GSP_POWER {"op":0,"rc":0,"status":0,"result":0,"stage":100,"armed":0,"active":0,"poisoned":0,"writes":0,"max":175000,"fe":175000,"upper":175000,"current":145000}
-GSP_POWER {"op":1,"rc":0,"status":0,"result":0,"stage":100,"armed":1,"active":0,"poisoned":0,"writes":1,"max":175000,"fe":175000,"upper":175000,"current":145000}
-GSP_POWER {"op":2,"rc":0,"status":0,"result":0,"stage":100,"armed":1,"active":1,"poisoned":0,"writes":4,"max":225000,"fe":225000,"upper":225000,"current":145000}
-GSP_PUBLIC_MAX {"rc":0,"status":0,"mask":589439,"value":225000,"expected":225000}
-GSP_POWER {"op":3,"rc":0,"status":0,"result":0,"stage":100,"armed":1,"active":0,"poisoned":0,"writes":7,"max":175000,"fe":175000,"upper":175000,"current":145000}
-GSP_PUBLIC_MAX {"rc":0,"status":0,"mask":589439,"value":175000,"expected":175000}
-GSP_POWER SUCCESS mode=exercise

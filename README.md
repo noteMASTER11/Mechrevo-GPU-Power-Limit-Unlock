@@ -1,90 +1,46 @@
-# Mechrevo GPU Power Limit Unlock for Linux
+# NVIDIA Laptop GPU Power Policy for Linux
 
-**225 W GPU power-limit operation is working on the tested MECHREVO RTX 5080 Laptop.** The v6 driver reports CURRENT, MAX and UPPER at 225,000 mW; NVIDIA NVML subsequently reports an enforced power limit of 225 W. The owner confirmed successful operation in FurMark.
+This repository contains the live-validated **V11 semantic resolver** used to raise the power policy of a MECHREVO RTX 5080 Laptop GPU on Linux. It patches NVIDIA's open kernel module, discovers the current GSP power-policy topology at boot, applies a guarded transaction, and asks NVIDIA's original GSP controls to activate a 225 W base/current policy under a 250 W ceiling.
 
-This project documents how to access the GPU's GSP-managed power policies from Linux, inspect their limits, raise the validated board-power ceilings, and submit a new operating-power request through NVIDIA's own firmware handlers. It uses NVIDIA's open kernel module with the original GSP firmware. No hardware shunt modification or EEPROM flashing is involved.
+No VBIOS or EEPROM is flashed. The ordinary stock boot entry remains the recovery path.
 
-**Start with the [step-by-step installation and operation guide](docs/INSTALL.md).** Read the [compatibility requirements](docs/COMPATIBILITY.md) before building. The verified v6 path remains tied to one hardware/firmware layout. The experimental v8 resolver has been validated for address-free discovery and ceiling resolution. v8r6 corrects the base-policy SET wire format found defective in v8r5 and is prepared for live validation.
+## Verified result
 
-## Experimental semantic resolver (v8)
-
-The v8 resolver receives only a bounded reader for the current GSP heap. It no
-longer accepts a heap virtual address, GPU/PMGR/PowerChannel addresses, member
-offsets, a stock wattage, or a driver-version layout profile from user space.
-It finds a unique topology from policy-array shape, common object identity,
-board-selector semantics, and the cTGP lower/upper tuple. Ambiguous or damaged
-snapshots fail closed.
-
-The same portable C core is compiled both by the offline tests and by the
-in-tree NVIDIA owner adapter. Live v8r4 evidence confirms that the resolver can
-relocate the policy topology and identify the three ceiling writers without
-stored addresses. The later v8r5 attempt showed that a successful policy GET
-does not establish that the corresponding SET buffer is valid. Its
-policy-2-only SET returned `NV_ERR_RESET_REQUIRED`, halted the PMU and caused
-the graphical session to lose the GPU. Offline capture of NVIDIA's own hidden
-packer then established that SET uses `0x000000ff` at header offset `+0x0c`
-and no GET mask at `+0x10`. v8r6 reproduces the captured 13,876-byte SET buffer
-byte-for-byte and is installed as a separate, not-yet-validated boot entry.
-
-This removes dependency on the previously captured live addresses and private
-object member offsets. It does not yet remove every compatibility boundary:
-the patch is still compiled into matching NVIDIA open-module source, uses the
-Blackwell WPR/ACR heap prefix, and calls the current internal PMGR control ABI.
-See [the v8 validation guide](docs/SEMANTIC-V8.md), [failure record](evidence/2026-09-22-v8r5-pmu-halt.md), and [architecture](docs/ARCHITECTURE.md).
-
-## Read in this order
-
-1. [Compatibility and prerequisites](docs/COMPATIBILITY.md): identify the GPU, driver and kernel; understand what is tested.
-2. [Installation and operation](docs/INSTALL.md): inspect stock limits, build the software, disable competing TGP controllers, prepare a separate boot entry, activate and verify.
-3. [Tool reference](docs/TOOLS.md): source components, commands and tests.
-4. [Unified resolver architecture](docs/ARCHITECTURE.md): separation of WPR discovery, protected-memory transport, semantic resolution and writer authorization.
-5. [Semantic v8 validation](docs/SEMANTIC-V8.md): the address-free resolver, isolated boot transaction and remaining compatibility boundaries.
-6. [Wiki](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/wiki): GPU access, GSP policies, the exact mechanism, research history, porting and recovery.
-7. [Evidence](evidence/README.md): what the first successful run demonstrated and what was not measured.
-
-## What changed
-
-| Value | Stock / before activation | Working v6 readback |
+| Property | Stock | V11 readback |
 |---|---:|---:|
-| Board policy effective MAX | 175 W | 225 W |
-| Board policy MAX source FE | 175 W | 225 W |
-| Platform UPPER | 175 W | 225 W |
-| Board policy CURRENT | Up to 175 W | 225 W |
-| NVML enforced power limit | 145–175 W, depending on state | 225 W |
+| Total ceiling / MAX | 175 W | 250 W |
+| Base/internal policy | 150 W | 225 W |
+| CURRENT | 80 W at captured boot | 225 W |
+| Entry 13 envelope | 210000 | 250000 |
+| Entry 14 envelope | 60000 | 100000 |
 
-Raising MAX alone was insufficient. The successful sequence also invokes the internal cTGP offset handler (`0x20800ad3`) and cTGP mode handler (`0x20800ad2`), which generate the CURRENT/source F7 request. With UPPER = 225,000 mW and LOWER = 80,000 mW, the fixed offset is 145,000 mW. The Wiki explains why this is an **offset**, not a 145 W target or a rail-current setting.
+V11 completed 16 protected-heap writes, zero rollback writes, and two original GSP control calls. A second semantic resolution recognized the resulting active CURRENT record. Four FurMark workloads reached 202.32–209.63 W peak instantaneous power with no Xid, PMU halt, hardware brake, or board-limit event. NVIDIA reported `SW Power Cap`; synchronized policy status localized that condition to the aggregate TOTAL regulator while the two raised rail envelopes retained substantial headroom.
 
-Before applying the unlock, disable any software or service that controls GPU TGP/power limits. A competing controller can overwrite the requested limit. No particular control-center application is required.
-
-## Tested machine
-
-| Component | Verified configuration |
-|---|---|
-| Laptop | MECHREVO YAOSHI Series-X6AR55xY |
-| GPU | NVIDIA GeForce RTX 5080 Laptop GPU |
-| PCI ID / subsystem | `10de:2c19` / `1d05:6041` |
-| Distribution / kernel | CachyOS / `7.2.6-1-cachyos` |
-| NVIDIA open driver and GSP | `615.71.09` |
-| VBIOS | `98.03.5E.00.5C` |
-| Bootloader | Limine |
-| Cooling during owner test | Owner's water-cooled laptop setup |
-
-The first recorded FurMark run used OpenGL at 7680×4320 for 38.559 seconds and logged a maximum GPU temperature of 59 °C. It contains no sampled power trace. The 225 W policy readback, owner-reported load success and FurMark statistics are documented separately; this short run is not a long-term stability qualification.
+The result is address-free with respect to the live power topology: user space supplies no heap address, object address, member offset, or saved layout. Compatibility is still bounded by the NVIDIA source/GSP ABI and the Blackwell protected-memory transport used by the adapter.
 
 ## Repository layout
 
-- `scripts/`, `src/`, `patches/`, `tests/`: maintained build/deployment software, runtime helpers, driver changes and checks. `nvidia-gsp-semantic-tgp-v8.patch` contains the current semantic-resolver experiment. See [Tools](docs/TOOLS.md).
-- `docs/`: sequential instructions and compatibility notes.
-- `docs/wiki/`: version-controlled sources mirrored to the GitHub Wiki.
-- `evidence/`: sanitized successful-run records.
-- `outputs/225w-research/`, `work/`: preserved research checkpoints, including failed and superseded experiments. Their historical status statements describe those experiments, not the project's current result.
+- `core/` and `include/`: portable semantic resolver and contract code.
+- `patches/nvidia-gsp-unified-tgp-v11.patch`: production patch for the pinned NVIDIA open-module source.
+- `src/runtime/`: standalone C launcher and systemd units.
+- `scripts/build_unified_v11.py`: reproducible build without installation.
+- `tests/`: synthetic relocation, ambiguity, active-state, and contract tests.
+- `tools/diagnostics/`: read-only diagnostic utilities.
 
-Firmware, raw GPU heap dumps, private machine logs and kernel/initramfs binaries are not bundled. Build from the pinned source and use your installed matching firmware. Archived deployment manifests with `/path/to/research-workspace` are records, not commands to execute; use the current installation guide.
+Detailed theory, installation, validation evidence, recovery, and the complete research history live in the [GitHub Wiki](https://github.com/noteMASTER11/Mechrevo-GPU-Power-Limit-Unlock/wiki).
 
-## Operating boundaries
+## Build and test
 
-The probe validates the exact GPU, ownership links, policy signatures and expected starting values. It offers a fixed 225 W activation and explicit restoration, not arbitrary memory writes or unrestricted power sliders. Failed or uncertain RPCs stop further mutation. The ordinary stock boot entry remains the recovery path.
+```sh
+make test
+python scripts/build_unified_v11.py --prepare-only
+python scripts/build_unified_v11.py
+```
 
-Activation runs once on each selected dedicated boot. Continued operation after suspend, GPU reset, firmware override or driver/kernel updates is not established. Those cases require fresh validation rather than automatic retries or removal of guards.
+The build script pins NVIDIA source commit `61dcc93722ecb418bb5f2e00923f05b4b8051dd1`, builds against the selected kernel headers, compiles the C launcher, verifies module marker `semantic-tgp-v11-20260922`, and emits hashes under `build/unified-v11/`. It does not install modules, edit the bootloader, load a driver, or change a power limit.
 
-See [component licensing](LICENSES.md) and [contribution guidelines](CONTRIBUTING.md) before redistributing modifications or proposing support for another machine.
+The tested host is MECHREVO YAOSHI Series-X6AR55xY, GPU `10de:2c19`, subsystem `1d05:6041`, CachyOS kernel `7.2.6-1-cachyos`, NVIDIA/GSP `615.71.09`, and VBIOS `98.03.5E.00.5C`. Treat other hardware or driver versions as ports requiring fresh validation.
+
+Before activation, software that writes GPU TGP must yield ownership. On the tested host UCC remained active for system profile, fan, and water-cooler control while its **Max TGP** mode stopped TGP writes. Dynamic Boost service `nvidia-powerd` was disabled only for the dedicated V11 boot.
+
+See [LICENSES.md](LICENSES.md) and [CONTRIBUTING.md](CONTRIBUTING.md).

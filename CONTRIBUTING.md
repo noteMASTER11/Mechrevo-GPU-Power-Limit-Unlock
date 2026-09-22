@@ -8,4 +8,4 @@ Separate observed values from inference. A changed MAX is not a changed CURRENT;
 
 Keep changes bounded and test failure paths, especially partial writes, failed readback, once-per-boot state and release ordering. Never run live GPU writes in automated CI. Raw heaps, NVLOG archives, authentication material, machine journals and proprietary firmware must stay out of commits.
 
-The public Wiki is mirrored from `docs/wiki/`. Update those sources in the same change as related code and installation instructions so the two repositories remain consistent.
+Detailed documentation belongs in the GitHub Wiki. Keep the main branch limited to maintained source, build tooling, tests, service definitions, licenses, and the short project README.
